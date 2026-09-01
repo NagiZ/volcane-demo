@@ -40,8 +40,8 @@ function toArkError(err: unknown): ArkApiError {
     const lower = `${message} ${code ?? ''}`.toLowerCase();
     const isSessionNotFound =
       status === 404 ||
-      (lower.includes('session') &&
-        (lower.includes('not found') || lower.includes('不存在') || lower.includes('invalid')));
+      lower.includes('session_not_found') ||
+      (lower.includes('session') && (lower.includes('not found') || lower.includes('不存在')));
     return new ArkApiError(message, { status, code, isSessionNotFound });
   }
   return new ArkApiError(err instanceof Error ? err.message : 'Unknown ark error');

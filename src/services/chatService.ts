@@ -38,9 +38,9 @@ export class ChatService {
     res: Response,
     input: { webUserToken: string; userMessage: string },
   ): Promise<void> {
-    initSse(res);
-
     let session = await this.sessionService.getOrCreateSession(input.webUserToken);
+
+    initSse(res);
 
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
@@ -52,7 +52,19 @@ export class ChatService {
         const arkErr = err instanceof ArkApiError ? err : new ArkApiError(String(err));
         const canRetry = attempt === 0 && arkErr.isSessionNotFound;
         if (canRetry) {
-          session = await this.sessionService.invalidateAndRecreate(input.webUserToken);
+          try {
+            session = await this.sessionService.invalidateAndRecreate(input.webUserToken);
+          } catch (recreateErr) {
+            const recreateArkErr =
+              recreateErr instanceof ArkApiError ? recreateErr : new ArkApiError(String(recreateErr));
+            writeSseEvent(res, {
+              type: 'error',
+              code: recreateArkErr.code ?? 'SESSION_RECREATE_FAILED',
+              message: recreateArkErr.message,
+            });
+            endSse(res);
+            return;
+          }
           continue;
         }
         writeSseEvent(res, {
