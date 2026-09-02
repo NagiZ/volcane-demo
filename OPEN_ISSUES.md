@@ -1,7 +1,7 @@
 # 待处理问题：方舟接口对接偏差
 
 > 记录时间：2026-09-02
-> 状态：**问题 1–4 均已修复**（2026-09-02 代码更新）
+> 状态：**问题 1–4 均已修复并通过真实 Ark E2E 验证**（2026-09-02）
 >
 > 背景：首次运行本项目时 `POST /api/agent/chat` 返回 `{"error":"Request failed with status code 400"}`。
 > 经直连方舟接口逐项探测，定位出以下 4 个问题。
@@ -17,8 +17,9 @@
 | 依赖 | 已安装 |
 | Redis | OrbStack 容器运行中，`redis-cli ping` → `PONG` |
 | `.env` 三个 ARK 变量 | 已填入真实凭据 |
-| 单元测试 | 6/6 通过 |
+| 单元测试 | 15/15 通过 |
 | 服务启动 | `npm run dev` → `http://127.0.0.1:3000` 正常 |
+| 真实 Ark E2E | ✅ 通过（见文末「E2E 验证结果」） |
 
 > **附注：Docker 镜像拉取。** 直连 Docker Hub 拉取 `redis:7` 失败（`registry-1.docker.io` 返回 502 Bad Gateway）。
 > 已改用镜像源拉取后打本地标签绕过，`docker-compose.yml` 无需修改：
@@ -97,11 +98,11 @@ curl -X POST "https://ark.cn-beijing.volces.com/api/v3/sessions" \
 | 验证项 | 结果 |
 |--------|------|
 | `npx tsc --noEmit` | 通过 |
-| `npm test` | 6/6 通过（注：**均未覆盖 `createArkSession`**，见下） |
+| `npm test` | 15/15 通过（`arkClient` 请求体字段名已纳入覆盖） |
 | `POST /api/agent/rebuild-session` | **200** `{"ok":true,"tokenHash":"4fd6d90c...","sessionId":"sesn-20260902040239-6dctk"}` |
 
 **为何用 `rebuild-session` 验证：** 该路由（`src/routes/agent.ts:38`）调用 `createArkSession` 后直接返回 JSON，
-不经过问题 4 的坏流路径，因此能干净地单独验证问题 1–2 —— 且验证的是**服务端真实代码路径**，非 curl 手工请求体。
+不经过问题 4 当时尚未修复的坏流路径，因此能干净地单独验证问题 1–2 —— 且验证的是**服务端真实代码路径**，非 curl 手工请求体。
 
 **env 覆盖注入确认**（问题 2 的实质目的）——回查服务创建出的 Session：
 
@@ -178,25 +179,104 @@ injected env:        {"USER_BEARER_TOKEN":"fix-verify-token",
 | `src/clients/arkClient.test.ts` | 请求体字段名单测（新增） |
 | `src/utils/pollSessionEvents.test.ts` | 轮询逻辑单测（新增） |
 
-**验证：** `npm test` 15/15 通过，`npm run build` 通过。真实 Ark E2E 需本机填 `.env` 后 `curl /api/agent/chat`。
+**验证：** `npm test` 15/15 通过，`npm run build` 通过。真实 Ark E2E 已通过（见下节）。
+
+> ⚠️ **实测修正：`Accept: text/event-stream` 在本环境不生效。**
+> 步骤 2 的流式尝试**从未成功**，实际始终走步骤 3 的轮询回退。实测证据：
+>
+> | 时机 | 请求 | 响应 |
+> |------|------|------|
+> | Session idle | `GET /events` + `Accept: text/event-stream` | `200`，`application/json; charset=utf-8` |
+> | Session **处理中**（投递长回答后立即请求） | 同上 | `200`，`application/json; charset=utf-8` |
+>
+> 两种时机下 `Content-Type` 均为 JSON，无 SSE 分块。特意在「处理中」复测，是为排除
+> 「因 Session 空闲才降级为 JSON」的可能——结论是该接口在本环境不支持 SSE。
+>
+> 这不影响功能正确性（轮询回退工作正常），但意味着：
+> - `tryStreamSessionEvents` 目前是**未被真正启用的代码路径**，每轮对话会多一次无效请求；
+> - 若官网文档确认该 header 应当生效，则可能是 API 版本/地域/Agent 配置差异，值得再核对；
+> - 若确认不支持，可考虑移除该尝试以省掉一次往返。
+
+---
+
+## E2E 验证结果（真实 Ark 调用）
+
+服务运行于 `http://127.0.0.1:3000`，Redis 为 OrbStack 容器，凭据取自 `.env`。
+
+**第一轮** — `POST /api/agent/chat`，`webUserToken: "e2e-verify"`：
+
+```
+data: {"type":"delta","text":"你好！我是 pms-agent，一个运行在命令行环境中的通用智能体，可以帮你完成软件开发、终端操作、数据分析、文档写作等各种任务——比如乐药内部系统的 PMS 业务操作也可以通过我来完成。有什么需要帮忙的吗？"}
+
+data: {"type":"done"}
+```
+
+**第二轮**（同一 token）— 问「我刚才问你的第一句话是什么？请原样重复」：
+
+```
+data: {"type":"delta","text":"你刚才问我的第一句话是：“你好，请用一句话自我介绍”。"}
+
+data: {"type":"done"}
+```
+
+### 验证结论
+
+| 验证项 | 结果 | 依据 |
+|--------|------|------|
+| SSE 契约 | ✅ | `delta` → `done`，与 README 定义一致 |
+| **会话复用** | ✅ | 第二轮准确复述第一轮内容，证明 Redis 映射生效、非每次新建 Session |
+| **`agent.thinking` 过滤** | ✅ | 方舟侧确实产生 `agent.thinking x2`，但两轮 SSE 输出均无思维链混入 |
+| 多轮落于同一 Session | ✅ | 方舟侧 `user.message x2`，Session ID 唯一 |
+
+**方舟侧事件统计**（Session `sesn-20260902055828-26lb8`，对应 Redis key `ark:session:map:9041cc57...`）：
+
+```
+session.status_running x2      user.message x2         agent.thinking x2
+session.thread_status_running x2   span.model_request_start x2   agent.message x2
+session.thread_status_idle x2      span.model_request_end x2     session.status_idle x2
+```
+
+> `agent.thinking` 的过滤是**被真实数据触发并验证**的，而非碰巧未遇到——这是特意回查方舟侧事件列表确认的。
+
+### 已知行为差异：非逐字流式
+
+轮询实现下 `delta` 为**整段一次性下发**（上述两轮各只有 1 个 `delta` 事件），
+对前端 SSE 契约成立，但**无打字机逐字效果**。
+
+若需真正的逐字流式，取决于方舟是否提供原生流式接口——目前已排除 8 种尝试
+（见问题 4 的排除表 + 上文 `Accept: text/event-stream` 的两次时机实测）。
 
 ---
 
 ## 探测与验证产生的副作用
 
-在方舟侧创建了 3 个真实 Session（含少量 token 消耗），如需清理可留意：
+在方舟侧创建了 4 个真实 Session（含 token 消耗），如需清理可留意：
 
 | Session ID | 来源 | 说明 |
 |------------|------|------|
 | `sesn-20260902034457-hqr9m` | curl 直连探测 | 收到 2 条消息（"你好，请用一句话自我介绍"、"1+1等于几"） |
 | `sesn-20260902034457-c6qwg` | curl 直连探测 | 未发送消息 |
 | `sesn-20260902040239-6dctk` | **服务端** `rebuild-session` | 问题 1–2 修复验证，未发送消息 |
+| `sesn-20260902055828-26lb8` | **服务端** `chat` | E2E 验证，收到 3 条消息（2 轮对话 + 1 条 SSE 时机探测） |
 
-**Redis 状态：** 前 2 个由 curl 直连创建，未写入映射。
-第 3 个经服务创建，**已在 Redis 写入映射** `tokenHash(fix-verify-token) → sesn-20260902040239-6dctk`
-（tokenHash `4fd6d90c...`）。此为验证用的测试数据，可按需清理：
+**Redis 中的测试映射**（均为验证数据，可按需清理）：
+
+| tokenHash 前缀 | webUserToken | Session |
+|----------------|--------------|---------|
+| `4fd6d90c...` | `fix-verify-token` | `sesn-20260902040239-6dctk` |
+| `9041cc57...` | `e2e-verify` | `sesn-20260902055828-26lb8` |
+
+前 2 个 Session 由 curl 直连创建，未写入 Redis 映射。
 
 ```bash
-docker compose exec redis redis-cli --scan --pattern '*4fd6d90c*'
+# 查看
+docker compose exec redis redis-cli --scan --pattern 'ark:session:map:*'
+# 清理本次验证数据
+docker compose exec redis redis-cli DEL \
+  ark:session:map:4fd6d90c54b0753db590203ff338e738ea6c24d8c568cf99201169f053bde791 \
+  ark:session:map:9041cc577fac319d2bb8a0dce1cdce7bbd3337c7db6852c95dc52152e497a976
 ```
+
+> 另注：`sesn-20260902055828-26lb8` 的第 3 条消息（"请从1数到20…"）是为验证
+> 「处理中」时机的 SSE 行为而直连投递的，其 `agent.message` 未经服务读取，属探测残留。
 
