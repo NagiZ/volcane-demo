@@ -47,6 +47,8 @@ npm start
 
 ## API 示例
 
+> **实现说明：** `POST /events` 仅投递消息；Agent 回复通过 `GET /events` 轮询（或 SSE GET）获取后，再以归一化 SSE 推给前端。
+
 ### Chat（SSE 流式对话）
 
 ```bash

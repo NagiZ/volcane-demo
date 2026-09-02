@@ -1,9 +1,14 @@
 import axios, { AxiosError, type AxiosResponse } from 'axios';
+import type { Readable } from 'node:stream';
 import type {
   CreateSessionParams,
   CreateSessionResponse,
+  ListSessionEventsParams,
+  ListSessionEventsResponse,
   SendEventParams,
-  SendSessionEventBody,
+  SendSessionEventsRequestBody,
+  SendSessionEventsResponse,
+  ArkSessionEvent,
 } from '../types/ark.js';
 
 export class ArkApiError extends Error {
@@ -27,16 +32,33 @@ function authHeaders(apiKey: string) {
   };
 }
 
+function readArkErrorPayload(data: unknown): { message: string; code?: string } {
+  if (!data || typeof data !== 'object') {
+    return { message: 'Unknown ark error' };
+  }
+  const obj = data as Record<string, unknown>;
+  const nested = obj.error;
+  if (nested && typeof nested === 'object') {
+    const err = nested as Record<string, unknown>;
+    return {
+      message: typeof err.message === 'string' ? err.message : 'Ark API error',
+      code: typeof err.code === 'string' ? err.code : undefined,
+    };
+  }
+  return {
+    message:
+      (typeof obj.message === 'string' && obj.message) ||
+      (typeof obj.error === 'string' && obj.error) ||
+      'Ark API error',
+    code: typeof obj.code === 'string' ? obj.code : undefined,
+  };
+}
+
 function toArkError(err: unknown): ArkApiError {
   if (err instanceof ArkApiError) return err;
   if (err instanceof AxiosError) {
     const status = err.response?.status;
-    const data = err.response?.data as Record<string, unknown> | undefined;
-    const message =
-      (typeof data?.message === 'string' && data.message) ||
-      (typeof data?.error === 'string' && data.error) ||
-      err.message;
-    const code = typeof data?.code === 'string' ? data.code : undefined;
+    const { message, code } = readArkErrorPayload(err.response?.data);
     const lower = `${message} ${code ?? ''}`.toLowerCase();
     const isSessionNotFound =
       status === 404 ||
@@ -47,8 +69,8 @@ function toArkError(err: unknown): ArkApiError {
   return new ArkApiError(err instanceof Error ? err.message : 'Unknown ark error');
 }
 
-/** 创建 Ark Managed Agent Session（environment_with_overrides 全量 env） */
-export async function createArkSession(params: CreateSessionParams): Promise<{ sessionId: string }> {
+/** 构造创建 Session 请求体（便于单测断言字段名） */
+export function buildCreateSessionBody(params: CreateSessionParams): Record<string, unknown> {
   const body: Record<string, unknown> = {
     agent: params.agentId,
     environment: {
@@ -63,11 +85,27 @@ export async function createArkSession(params: CreateSessionParams): Promise<{ s
     },
   };
   if (params.sessionId) body.id = params.sessionId;
+  return body;
+}
 
+/** 构造发送事件请求体：官方要求 events 数组包裹 */
+export function buildSendSessionEventsBody(userMessage: string): SendSessionEventsRequestBody {
+  return {
+    events: [
+      {
+        type: 'user.message',
+        content: [{ type: 'text', text: userMessage }],
+      },
+    ],
+  };
+}
+
+/** 创建 Ark Managed Agent Session（environment_with_overrides 全量 env） */
+export async function createArkSession(params: CreateSessionParams): Promise<{ sessionId: string }> {
   try {
     const res = await axios.post<CreateSessionResponse>(
       `${params.arkBaseUrl}/sessions`,
-      body,
+      buildCreateSessionBody(params),
       { headers: authHeaders(params.arkApiKey), timeout: 30_000 },
     );
     if (!res.data?.id) throw new ArkApiError('Create session response missing id');
@@ -77,20 +115,59 @@ export async function createArkSession(params: CreateSessionParams): Promise<{ s
   }
 }
 
-/**
- * 向 Session 发送用户消息，返回上游 SSE 字节流。
- * 请求体对齐官方「发送会话事件」：type=user.message，content 为文本块数组。
- */
-export async function sendSessionEvent(params: SendEventParams): Promise<NodeJS.ReadableStream> {
-  const body: SendSessionEventBody = {
-    type: 'user.message',
-    content: [{ type: 'text', text: params.userMessage }],
-  };
+function normalizeEventsResponse(data: ListSessionEventsResponse | ArkSessionEvent[]): ArkSessionEvent[] {
+  if (Array.isArray(data)) return data;
+  return data.data ?? [];
+}
 
+/** 查询会话事件列表（JSON）— 官方「查询会话事件列表」 */
+export async function listSessionEvents(params: ListSessionEventsParams): Promise<ArkSessionEvent[]> {
   try {
-    const res: AxiosResponse<NodeJS.ReadableStream> = await axios.post(
+    const res = await axios.get<ListSessionEventsResponse | ArkSessionEvent[]>(
       `${params.arkBaseUrl}/sessions/${encodeURIComponent(params.sessionId)}/events`,
-      body,
+      {
+        headers: authHeaders(params.arkApiKey),
+        timeout: 30_000,
+        signal: params.signal,
+      },
+    );
+    return normalizeEventsResponse(res.data);
+  } catch (err) {
+    throw toArkError(err);
+  }
+}
+
+/**
+ * 向 Session 发送用户消息（投递确认 JSON，非 SSE）。
+ * 官方「发送会话事件」：body 必须为 { events: [...] }。
+ */
+export async function sendSessionEvent(params: SendEventParams): Promise<SendSessionEventsResponse> {
+  try {
+    const res = await axios.post<SendSessionEventsResponse>(
+      `${params.arkBaseUrl}/sessions/${encodeURIComponent(params.sessionId)}/events`,
+      buildSendSessionEventsBody(params.userMessage),
+      {
+        headers: authHeaders(params.arkApiKey),
+        timeout: 30_000,
+        signal: params.signal,
+      },
+    );
+    return res.data;
+  } catch (err) {
+    throw toArkError(err);
+  }
+}
+
+/**
+ * 尝试流式获取会话事件（官方「流式获取会话事件」）。
+ * 若上游返回非 SSE，返回 null，由调用方回退到轮询。
+ */
+export async function tryStreamSessionEvents(
+  params: ListSessionEventsParams,
+): Promise<NodeJS.ReadableStream | null> {
+  try {
+    const res: AxiosResponse<NodeJS.ReadableStream> = await axios.get(
+      `${params.arkBaseUrl}/sessions/${encodeURIComponent(params.sessionId)}/events`,
       {
         headers: {
           ...authHeaders(params.arkApiKey),
@@ -99,10 +176,16 @@ export async function sendSessionEvent(params: SendEventParams): Promise<NodeJS.
         responseType: 'stream',
         timeout: 0,
         signal: params.signal,
+        validateStatus: (status) => status >= 200 && status < 300,
       },
     );
+    const contentType = String(res.headers['content-type'] ?? '');
+    if (!contentType.includes('text/event-stream')) {
+      (res.data as Readable).destroy?.();
+      return null;
+    }
     return res.data;
-  } catch (err) {
-    throw toArkError(err);
+  } catch {
+    return null;
   }
 }

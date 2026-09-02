@@ -1,8 +1,15 @@
 import type { IncomingMessage } from 'node:http';
 import type { Readable } from 'node:stream';
 import type { Response } from 'express';
-import { ArkApiError, sendSessionEvent } from '../clients/arkClient.js';
+import {
+  ArkApiError,
+  listSessionEvents,
+  sendSessionEvent,
+  tryStreamSessionEvents,
+} from '../clients/arkClient.js';
 import type { AppConfig } from '../config.js';
+import { sessionEventKey } from '../utils/arkEventParser.js';
+import { pollSessionEventsForAgentReply } from '../utils/pollSessionEvents.js';
 import { endSse, initSse, writeSseEvent } from '../utils/sse.js';
 import { pipeArkStreamToSse } from '../utils/streamArkEvents.js';
 import { SessionService } from './sessionService.js';
@@ -17,20 +24,47 @@ export class ChatService {
     private readonly sessionService: SessionService,
   ) {}
 
-  private async streamOnce(sessionId: string, userMessage: string, res: Response): Promise<void> {
-    const upstream = (await sendSessionEvent({
+  private arkListParams(sessionId: string, signal?: AbortSignal) {
+    return {
       arkApiKey: this.config.arkApiKey,
       arkBaseUrl: this.config.arkBaseUrl,
       sessionId,
-      userMessage,
-    })) as Readable;
+      signal,
+    };
+  }
+
+  private async streamOnce(sessionId: string, userMessage: string, res: Response): Promise<void> {
+    const abortController = new AbortController();
+    const signal = abortController.signal;
 
     res.on('close', () => {
-      upstream.destroy();
+      abortController.abort();
     });
 
-    await pipeArkStreamToSse(upstream as unknown as IncomingMessage, (text) => {
-      writeSseEvent(res, { type: 'delta', text });
+    const baselineEvents = await listSessionEvents(this.arkListParams(sessionId, signal));
+    const baselineEventIds = new Set(baselineEvents.map((event) => sessionEventKey(event)));
+
+    await sendSessionEvent({
+      ...this.arkListParams(sessionId, signal),
+      userMessage,
+    });
+
+    const stream = await tryStreamSessionEvents(this.arkListParams(sessionId, signal));
+    if (stream) {
+      let gotContent = false;
+      await pipeArkStreamToSse(stream as unknown as IncomingMessage, (text) => {
+        gotContent = true;
+        writeSseEvent(res, { type: 'delta', text });
+      });
+      if (gotContent) return;
+      (stream as Readable).destroy?.();
+    }
+
+    await pollSessionEventsForAgentReply({
+      listEvents: () => listSessionEvents(this.arkListParams(sessionId, signal)),
+      baselineEventIds,
+      onDelta: (text) => writeSseEvent(res, { type: 'delta', text }),
+      signal,
     });
   }
 

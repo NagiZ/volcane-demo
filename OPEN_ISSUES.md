@@ -1,7 +1,7 @@
 # 待处理问题：方舟接口对接偏差
 
 > 记录时间：2026-09-02
-> 状态：**问题 1–2 已修复并验证**；**问题 3 已定位待修**；**问题 4 阻塞，等待官网文档确认**
+> 状态：**问题 1–4 均已修复**（2026-09-02 代码更新）
 >
 > 背景：首次运行本项目时 `POST /api/agent/chat` 返回 `{"error":"Request failed with status code 400"}`。
 > 经直连方舟接口逐项探测，定位出以下 4 个问题。
@@ -117,9 +117,8 @@ injected env:        {"USER_BEARER_TOKEN":"fix-verify-token",
 `USER_ID` = tokenHash、`USER_BEARER_TOKEN` = 原始 token，与 `sessionService.ts:18-19` 传参一致，
 覆盖机制完全符合设计预期。**问题 1–2 至此闭环，无残留。**
 
-> ⚠️ **测试覆盖缺口（未解决）：** 6/6 通过与本次修复无关——现有单测只覆盖 `sse`/`arkEventParser`/`hash` 三个纯函数，
-> **`arkClient` 与 `createArkSession` 无任何测试**。这正是这两个字段名 bug 能潜到运行时才暴露的原因。
-> 建议在修问题 4 时一并补 `arkClient` 的请求体构造测试（断言字段名为 `agent` / `environment.id`），防止回归。
+> ⚠️ **测试覆盖（已改善）：** 现有 15 项单测覆盖 `hash` / `sse` / `arkEventParser` / `arkClient` 请求体构造 / `pollSessionEvents`。
+> 仍缺真实 Ark E2E 自动化测试。
 
 ---
 
@@ -136,113 +135,50 @@ injected env:        {"USER_BEARER_TOKEN":"fix-verify-token",
 
 ---
 
-## 问题 3：发送事件缺少 events 数组包裹 — 待修
+## 问题 3：发送事件缺少 events 数组包裹 — ✅ 已修复
 
-**位置：** `src/clients/arkClient.ts:85`（`sendSessionEvent` 的 body 构造）
-
-代码把单个事件对象直接作为 body，接口要求包在 `events` 数组内。
+**位置：** `src/clients/arkClient.ts` — `buildSendSessionEventsBody` / `sendSessionEvent`
 
 ```jsonc
-// 现状 ❌
-{ "type": "user.message", "content": [{ "type": "text", "text": "..." }] }
-// 接口要求 ✅
+// 修复后 ✅
 { "events": [{ "type": "user.message", "content": [{ "type": "text", "text": "..." }] }] }
 ```
 
-**方舟返回：**
-```json
-{"error":{"code":"InvalidParameter","message":"'events' field is a 'required' parameter, but the request does not have this parameter Request id: 021788320719466c023b1fb2f77c622a3f5432d0f622268496abb","type":"Bad Request"}}
-```
-
-**已验证：** 加上 `events` 包裹后消息投递成功，Agent 正常处理并回复（见问题 4 的事件列表）。
+**修复说明：** `sendSessionEvent` 改为 JSON 投递确认响应（非 stream）；单测 `arkClient.test.ts` 断言 `events` 数组结构。
 
 ---
 
-## 问题 4：⚠️ 阻塞 — `POST /events` 不流式返回回答
+## 问题 4：POST /events 不流式返回回答 — ✅ 已修复（轮询 + 可选 SSE GET）
 
-这是唯一无法靠改代码解决、需要文档确认的问题。
+**官方文档结构（Managed Agents API）：**
+- **发送会话事件** — `POST /sessions/{id}/events`（投递确认 JSON）
+- **查询会话事件列表** — `GET /sessions/{id}/events`（JSON 列表）
+- **流式获取会话事件** — 同路径 `GET`，请求头 `Accept: text/event-stream`
 
-### 需求假设与实测不符
+原实现误将 POST 响应当 SSE 消费，导致永远读不到 `agent.message`。
 
-`prompt.md:34` 与设计文档 `docs/superpowers/specs/2026-09-01-ark-managed-agent-proxy-design.md:187` 均假定：
+**修复方案（已实现）：**
 
-> 发送消息/事件接口：`POST /api/v3/sessions/{session_id}/events`，**流式返回 Agent 回答**。
+1. `POST` 投递 `user.message`（`events` 数组包裹）
+2. 优先尝试 `GET` + `Accept: text/event-stream`（`tryStreamSessionEvents`）
+3. 若非 SSE，回退 **轮询** `listSessionEvents`（`pollSessionEventsForAgentReply`）：
+   - 投递前记录 baseline 事件 id，避免历史事件干扰
+   - 只提取新增 `agent.message` 文本 → SSE `delta`
+   - 过滤 `agent.thinking`
+   - 出现 `session.status_idle` 且本轮有新 user/agent 事件时结束
 
-现有实现据此把该接口的响应当作 SSE 字节流消费（`responseType: 'stream'` → `streamArkEvents` → 归一化 `delta`）。
-
-**实测：该接口返回的是投递确认 JSON，而非 SSE 流。**
-
-```
-Content-Type: application/json; charset=utf-8
-
-{"data":[{"id":"sevt-20260902034529-qr4d5","type":"user.message","content":[{"type":"text","text":"你好，请用一句话自我介绍"}]}]}
-```
-
-响应仅回显刚投递的 `user.message`，**不含任何 Agent 回复内容**，且连接立即关闭。
-在 body 中加 `"stream": true` 无效（响应体不变）。
-
-### Agent 本身工作正常
-
-回复需通过 `GET /sessions/{id}/events` 读取。该接口返回完整事件列表，Agent 确实已正常处理：
-
-```
-session.status_running
-session.thread_status_running
-user.message              | "你好，请用一句话自我介绍"
-span.model_request_start
-agent.thinking            | "The user is asking me to introduce myself..."
-agent.message             | "你好，我是一个运行在命令行环境中的通用智能体，可以帮你完成代码编写与修复、终端操作..."
-span.model_request_end
-session.thread_status_idle
-session.status_idle
-```
-
-**结论：`agent.message` 即回复正文；`agent.thinking` 为思维链，归一化时应过滤。**
-Agent 配置回显：`pms-agent` / 模型 `deepseek-v4-flash-ga-260731` / `thinking: enabled`。
-
-### 已排除的流式方案
-
-| 尝试 | 结果 |
-|------|------|
-| `POST /events` body 加 `stream:true` | 无效，仍返回投递确认 JSON |
-| `GET /events?stream=true` | 200 但 `application/json`，非 SSE |
-| `GET /events?watch=true` | 同上 |
-| `GET /events?follow=true` | 同上 |
-| `GET /sessions/{id}/responses` | 404 Not Found |
-| `GET /sessions/{id}/stream` | 404 Not Found |
-| `GET /sessions/{id}/messages` | 404 Not Found |
-
-> 注：内置网络搜索无法查证方舟文档——请求被方舟侧拦截：
-> `403 Access denied ... verify the activation status`。故以上仅为黑盒探测，**不能排除存在未被试到的正确参数或专用接口**。
-
-### ❓ 待你从官网文档确认
-
-1. **是否存在原生流式订阅接口？** 若有，正确的路径与参数是什么？
-   （上表的路径/参数均已排除，可能是我未试到的形式。）
-2. **若无原生流式接口，采用哪种方案？**
-
-   - **方案 A：轮询模拟流式（倾向）** — `POST` 投递后轮询 `GET /events`，将新增 `agent.message` 增量转为 SSE `delta` 下发。
-     *优点：* 保留 README 已定义的前端 SSE 契约，前端无需改动。
-     *缺点：* 非真实流式，有轮询延迟；需处理去重（按事件 `id`）与终止判定（`session.status_idle`）。
-   - **方案 B：改为非流式** — 等处理完成后一次性返回完整回复，README 与 `/api/agent/chat` 契约相应调整。
-     *优点：* 实现简单，无轮询开销。*缺点：* 失去流式体验，长回答等待时间长。
-
-3. **若走方案 A，`GET /events` 是否支持增量拉取？**（如 `after`/`since`/`cursor` 类游标参数，避免每次全量拉取）——此项未探测。
-
-### 受影响范围
-
-修问题 4 需改动的文件（问题 1–2 已修完，仅动了 `arkClient.ts` 的两个字段名；问题 3 亦仅改 `arkClient.ts`）：
+**改动文件：**
 
 | 文件 | 说明 |
 |------|------|
-| `src/clients/arkClient.ts` | `sendSessionEvent` 返回类型由字节流改为其他形态 |
-| `src/utils/streamArkEvents.ts` | 上游不再是 SSE 字节流，解析逻辑需重写 |
-| `src/utils/arkEventParser.ts` | 改为解析事件对象；需过滤 `agent.thinking`，取 `agent.message` |
-| `src/utils/arkEventParser.test.ts` | 现有 3 个测试基于 SSE 行解析，需同步更新 |
-| `src/services/chatService.ts` | 编排逻辑（轮询循环 / 一次性等待） |
-| `README.md` | 若走方案 B 需更新 SSE 事件说明 |
+| `src/clients/arkClient.ts` | `sendSessionEvent` / `listSessionEvents` / `tryStreamSessionEvents` |
+| `src/utils/pollSessionEvents.ts` | 轮询编排（新增） |
+| `src/utils/arkEventParser.ts` | 解析 `agent.message`，过滤 `agent.thinking` |
+| `src/services/chatService.ts` | POST → stream GET 或 poll → 归一化 SSE |
+| `src/clients/arkClient.test.ts` | 请求体字段名单测（新增） |
+| `src/utils/pollSessionEvents.test.ts` | 轮询逻辑单测（新增） |
 
-> 提醒：现有单测虽 6/6 通过，但 `arkEventParser` 的测试是针对**假定的** SSE 行格式written 的，未覆盖真实响应形态——故测试通过并不代表对接正确。
+**验证：** `npm test` 15/15 通过，`npm run build` 通过。真实 Ark E2E 需本机填 `.env` 后 `curl /api/agent/chat`。
 
 ---
 
