@@ -24,6 +24,8 @@ describe('buildCreateSessionBody', () => {
     const config = environment.config as { env: Record<string, string> };
     expect(config.env.USER_ID).toBe('user-hash');
     expect(config.env.USER_BEARER_TOKEN).toBe('token');
+    // 前端输入的 token 需作为 Agent 启动密钥注入
+    expect(config.env.LEYO_AGENT_KEY).toBe('token');
   });
 });
 

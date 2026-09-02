@@ -80,6 +80,8 @@ export function buildCreateSessionBody(params: CreateSessionParams): Record<stri
         env: {
           USER_ID: params.userId,
           USER_BEARER_TOKEN: params.userBearerToken,
+          // 前端输入的 token 作为 Agent 启动时的密钥
+          LEYO_AGENT_KEY: params.userBearerToken,
         },
       },
     },
