@@ -100,7 +100,135 @@ describe('pollSessionEventsForAgentReply', () => {
     ).rejects.toMatchObject({ code: 'AGENT_REPLY_TIMEOUT' });
   });
 
-  it('持续有新事件但永不 idle 时，由总超时兜底', async () => {
+  it('已答完但方舟未发 idle 时正常结束，不报错', async () => {
+    // 复现线上问题：alice 已收到完整答案，却又收到 AGENT_REPLY_TIMEOUT。
+    // agent.message 之后永无 idle 事件，应按「已答完」正常返回。
+    const events: ArkSessionEvent[] = [
+      { id: 'u1', type: 'user.message', content: [{ type: 'text', text: '我的暗号是什么' }] },
+      { id: 'm1', type: 'agent.message', content: [{ type: 'text', text: '紫色大象' }] },
+    ];
+
+    const deltas: string[] = [];
+    await pollSessionEventsForAgentReply({
+      listEvents: async () => events, // 恒定，不再有新事件，也永不 idle
+      onDelta: (text) => deltas.push(text),
+      pollIntervalMs: 1,
+      settleAfterReplyMs: 0, // 收到回复后立即收口
+      idleTimeoutMs: 60_000,
+      timeoutMs: 5_000,
+    });
+
+    expect(deltas).toEqual(['紫色大象']);
+  });
+
+  it('已答完时优先按已答完收口，而非抛无进展超时', async () => {
+    // settleAfterReply 早于 idleTimeout 触发，故不应抛错。
+    const events: ArkSessionEvent[] = [
+      { id: 'm1', type: 'agent.message', content: [{ type: 'text', text: '答案' }] },
+    ];
+    const deltas: string[] = [];
+
+    await expect(
+      pollSessionEventsForAgentReply({
+        listEvents: async () => events,
+        onDelta: (text) => deltas.push(text),
+        pollIntervalMs: 1,
+        settleAfterReplyMs: 5,
+        idleTimeoutMs: 10, // 比 settle 稍长；若逻辑写反会抛错
+        timeoutMs: 5_000,
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(deltas).toEqual(['答案']);
+  });
+
+  it('未收到任何回复时仍按无进展超时报错', async () => {
+    // 与上一例的区别：无 agent.message → 必须报错，不能被 settle 逻辑吞掉
+    await expect(
+      pollSessionEventsForAgentReply({
+        listEvents: async () => [{ id: 'e1', type: 'session.status_running' }],
+        onDelta: () => {},
+        baselineEventIds: new Set(['e1']),
+        pollIntervalMs: 1,
+        settleAfterReplyMs: 0,
+        idleTimeoutMs: 0,
+        timeoutMs: 5_000,
+      }),
+    ).rejects.toMatchObject({ code: 'AGENT_REPLY_TIMEOUT' });
+  });
+
+  it('触达总上限时，已有回复则正常收口', async () => {
+    let n = 0;
+    const deltas: string[] = [];
+    // 持续刷新事件（无进展计时永不触发）但永不 idle，只能靠 timeoutMs 收口；
+    // 因已产出 agent.message，应正常返回而非报错。
+    await expect(
+      pollSessionEventsForAgentReply({
+        listEvents: async () => [
+          { id: 'm1', type: 'agent.message', content: [{ type: 'text', text: '答案' }] },
+          { id: `t${n++}`, type: 'agent.thinking' },
+        ],
+        onDelta: (text) => deltas.push(text),
+        pollIntervalMs: 1,
+        settleAfterReplyMs: 60_000,
+        idleTimeoutMs: 60_000,
+        timeoutMs: 30,
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(deltas).toEqual(['答案']);
+  });
+
+  it('工具静默执行期间不提前收口（agent.message 后跟 tool_use）', async () => {
+    // 复现实测时间线：Agent 先发说明性 message，紧跟 tool_use，
+    // 该工具静默执行 30s+ 无任何事件。若仅凭「已有 message」就收口，
+    // 会截断回复——必须等 tool_result 回来。
+    const mid: ArkSessionEvent[] = [
+      { id: 'u1', type: 'user.message', content: [{ type: 'text', text: '跑个命令' }] },
+      { id: 'm1', type: 'agent.message', content: [{ type: 'text', text: '接下来执行 sleep' }] },
+      { id: 'tu1', type: 'agent.tool_use' },
+    ];
+    const done: ArkSessionEvent[] = [
+      ...mid,
+      { id: 'tr1', type: 'agent.tool_result' },
+      { id: 'm2', type: 'agent.message', content: [{ type: 'text', text: '执行完毕' }] },
+      { id: 'i1', type: 'session.status_idle' },
+    ];
+
+    // 前若干轮停在 mid（模拟工具静默执行），之后才给出最终结果
+    let call = 0;
+    const deltas: string[] = [];
+    await pollSessionEventsForAgentReply({
+      listEvents: async () => (++call < 5 ? mid : done),
+      onDelta: (text) => deltas.push(text),
+      pollIntervalMs: 1,
+      settleAfterReplyMs: 0, // 即使宽限为 0，也不该在工具未完成时收口
+      idleTimeoutMs: 60_000,
+      timeoutMs: 5_000,
+    });
+
+    // 两段 message 都要拿到，证明没被提前截断
+    expect(deltas).toEqual(['接下来执行 sleep', '执行完毕']);
+  });
+
+  it('工具未完成时，触达总上限仍按超时报错', async () => {
+    // pendingToolCalls > 0 说明回复不完整，不应伪装成成功
+    await expect(
+      pollSessionEventsForAgentReply({
+        listEvents: async () => [
+          { id: 'm1', type: 'agent.message', content: [{ type: 'text', text: '开始执行' }] },
+          { id: 'tu1', type: 'agent.tool_use' }, // 永无 tool_result
+        ],
+        onDelta: () => {},
+        pollIntervalMs: 1,
+        settleAfterReplyMs: 0,
+        idleTimeoutMs: 60_000,
+        timeoutMs: 30,
+      }),
+    ).rejects.toMatchObject({ code: 'AGENT_REPLY_TIMEOUT' });
+  });
+
+  it('持续有新事件但永不 idle 且无回复时，由总超时报错', async () => {
     let n = 0;
     await expect(
       pollSessionEventsForAgentReply({
