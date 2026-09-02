@@ -50,10 +50,10 @@ function toArkError(err: unknown): ArkApiError {
 /** 创建 Ark Managed Agent Session（environment_with_overrides 全量 env） */
 export async function createArkSession(params: CreateSessionParams): Promise<{ sessionId: string }> {
   const body: Record<string, unknown> = {
-    agent_id: params.agentId,
+    agent: params.agentId,
     environment: {
       type: 'environment_with_overrides',
-      environment_id: params.baseEnvironmentId,
+      id: params.baseEnvironmentId,
       config: {
         env: {
           USER_ID: params.userId,
