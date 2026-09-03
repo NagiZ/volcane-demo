@@ -65,6 +65,53 @@ curl -X POST http://127.0.0.1:3000/api/agent/rebuild-session \
   -d '{"webUserToken":"demo-token"}'
 ```
 
+## 文件交互
+
+上传文件、挂载到会话沙箱、消息内直读引用，以及查询 Agent 产物文件。
+
+### 上传文件
+
+```bash
+curl -X POST http://localhost:3000/api/agent/upload-file \
+  -F 'webUserToken=demo-user' \
+  -F 'file=@./sample.pdf'
+```
+
+成功返回 `file_id`、`name`、`size`。
+
+### 对话（挂载 + 直读）
+
+```bash
+curl -N -X POST http://localhost:3000/api/agent/chat \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "webUserToken":"demo-user",
+    "userMessage":"请总结这个 PDF",
+    "file_ids":["file-xxx"],
+    "inline_file_ids":["file-xxx"]
+  }'
+```
+
+`file_ids` 将全部挂载到 `/mnt/session/uploads/`；`inline_file_ids` 须为 `file_ids` 子集，用于消息内 file block 直读。
+
+### 产物列表
+
+```bash
+curl 'http://localhost:3000/api/agent/output-files?webUserToken=demo-user'
+```
+
+返回当前会话 scope 内产物及方舟签名的 `download_url`。
+
+### 手测清单
+
+> 需配置 `.env` 中 `ARK_API_KEY` 等凭据后执行；未配置时仅作文档参考。
+
+- [ ] 上传 PDF → 返回 `file_id`
+- [ ] chat 仅 mount（不传 `inline_file_ids`）→ Agent 能读 `/mnt/session/uploads/...`
+- [ ] chat + inline → 模型能总结 PDF/图片
+- [ ] Agent 写 `/mnt/session/outputs/` → `output-files` 出现 `download_url`
+- [ ] 无文件 chat / interrupt / rebuild 仍正常
+
 ## SSE 事件说明
 
 服务将方舟原始 SSE 归一化为以下三种事件：
