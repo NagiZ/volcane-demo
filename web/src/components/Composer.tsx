@@ -20,7 +20,10 @@ export function Composer({ disabled, streaming, interrupting, onSend, onAbort }:
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    if (event.key === 'Enter' && !event.shiftKey) {
+    // 中文输入法选词时的 Enter 会冒泡成 keydown，不能当发送。
+    if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+    // 用修饰键发送，避免输入过程中误触 Enter 直接发出去。
+    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
       event.preventDefault();
       submit();
     }
@@ -40,7 +43,7 @@ export function Composer({ disabled, streaming, interrupting, onSend, onAbort }:
         value={draft}
         onChange={(event) => setDraft(event.target.value)}
         onKeyDown={onKeyDown}
-        placeholder="输入消息。Enter 发送，Shift+Enter 换行"
+        placeholder="输入消息。⌘/Ctrl+Enter 发送，Enter 换行"
       />
       {streaming ? (
         <button type="button" className="btn btn--abort" onClick={onAbort} disabled={interrupting}>
