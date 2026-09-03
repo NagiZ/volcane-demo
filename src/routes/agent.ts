@@ -67,5 +67,28 @@ export function createAgentRouter(deps: {
     }
   });
 
+  router.get('/messages', async (req: Request, res: Response) => {
+    const tokenErr = requireNonEmptyString(req.query?.webUserToken, 'webUserToken');
+    if (tokenErr) return res.status(400).json({ error: tokenErr });
+
+    const rawLimit = req.query?.limit;
+    const limit =
+      typeof rawLimit === 'string' && rawLimit.trim().length > 0 ? Number(rawLimit) : undefined;
+    if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 200)) {
+      return res.status(400).json({ error: 'limit must be an integer between 1 and 200' });
+    }
+
+    try {
+      const result = await deps.chatService.listRecentMessages(String(req.query.webUserToken).trim(), {
+        limit,
+      });
+      return res.status(200).json({ ok: true, ...result });
+    } catch (err) {
+      return res.status(503).json({
+        error: err instanceof Error ? err.message : 'List messages failed',
+      });
+    }
+  });
+
   return router;
 }

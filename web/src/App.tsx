@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ApiError, fetchHealth, interruptSession, rebuildSession, streamChat } from './api';
+import { ApiError, fetchHealth, fetchSessionMessages, interruptSession, rebuildSession, streamChat } from './api';
 import { Composer } from './components/Composer';
 import { MessageList } from './components/MessageList';
 import { TokenBar } from './components/TokenBar';
@@ -8,6 +8,7 @@ import type { BackendStatus, ChatMessage } from './types';
 const TOKEN_STORAGE_KEY = 'volcane.webUserToken';
 const DEFAULT_TOKEN = 'demo-user';
 const HEALTH_POLL_MS = 12_000;
+const HISTORY_DEBOUNCE_MS = 400;
 
 function nextId(): string {
   return crypto.randomUUID();
@@ -38,6 +39,8 @@ export function App() {
 
   const abortRef = useRef<AbortController | null>(null);
   const interruptedRef = useRef(false);
+  const streamingRef = useRef(false);
+  streamingRef.current = streaming;
 
   const busy = streaming || rebuilding;
 
@@ -78,6 +81,34 @@ export function App() {
       window.clearInterval(timer);
     };
   }, []);
+
+  useEffect(() => {
+    const trimmed = token.trim();
+    if (trimmed.length === 0) {
+      setMessages([]);
+      return;
+    }
+
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const result = await fetchSessionMessages(trimmed, controller.signal);
+          if (controller.signal.aborted || streamingRef.current) return;
+          setMessages(result.messages);
+        } catch (err) {
+          if (controller.signal.aborted || isAbortError(err)) return;
+          const message = err instanceof ApiError ? err.message : '拉取会话消息失败，请确认后端是否在线';
+          setNotice(message);
+        }
+      })();
+    }, HISTORY_DEBOUNCE_MS);
+
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [token]);
 
   function handleTokenChange(value: string) {
     if (value === token) return;

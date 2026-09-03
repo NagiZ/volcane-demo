@@ -3,6 +3,7 @@ import type { Readable } from 'node:stream';
 import type { Response } from 'express';
 import {
   ArkApiError,
+  listRecentSessionEvents,
   listSessionEvents,
   sendSessionEvent,
   sendSessionInterrupt,
@@ -11,6 +12,7 @@ import {
 import type { AppConfig } from '../config.js';
 import { sessionEventKey } from '../utils/arkEventParser.js';
 import { pollSessionEventsForAgentReply } from '../utils/pollSessionEvents.js';
+import { SESSION_HISTORY_LIMIT, toChronologicalChatMessages, type ChatHistoryMessage } from '../utils/sessionHistory.js';
 import { endSse, initSse, writeSseEvent } from '../utils/sse.js';
 import { pipeArkStreamToSse } from '../utils/streamArkEvents.js';
 import { SessionService } from './sessionService.js';
@@ -160,6 +162,35 @@ export class ChatService {
         endSse(res);
         return;
       }
+    }
+  }
+
+  /**
+   * 读取当前 token 对应 Session 的最近消息窗口。
+   * 无 Session 时返回空列表，不创建新会话。
+   */
+  async listRecentMessages(
+    webUserToken: string,
+    options?: { limit?: number; signal?: AbortSignal },
+  ): Promise<{ sessionId: string | null; messages: ChatHistoryMessage[] }> {
+    const session = await this.sessionService.getExistingSession(webUserToken);
+    if (!session) {
+      return { sessionId: null, messages: [] };
+    }
+    try {
+      const events = await listRecentSessionEvents({
+        ...this.arkListParams(session.sessionId, options?.signal),
+        limit: options?.limit ?? SESSION_HISTORY_LIMIT,
+      });
+      return {
+        sessionId: session.sessionId,
+        messages: toChronologicalChatMessages(events),
+      };
+    } catch (err) {
+      if (err instanceof ArkApiError && err.isSessionNotFound) {
+        return { sessionId: session.sessionId, messages: [] };
+      }
+      throw err;
     }
   }
 }

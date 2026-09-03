@@ -10,6 +10,7 @@ import type {
   SendSessionEventsResponse,
   ArkSessionEvent,
 } from '../types/ark.js';
+import { buildListRecentSessionEventsSearch } from '../utils/sessionHistory.js';
 
 export class ArkApiError extends Error {
   status?: number;
@@ -189,6 +190,29 @@ export async function listSessionEvents(params: ListSessionEventsParams): Promis
       );
       return normalizeEventsPage(res.data);
     });
+  } catch (err) {
+    throw toArkError(err);
+  }
+}
+
+/**
+ * 拉取最近一页会话事件（默认 50、倒序、仅 user/agent.message）。
+ * 不跟 next_page：Web 历史只需要最新窗口。
+ */
+export async function listRecentSessionEvents(
+  params: ListSessionEventsParams & { limit?: number },
+): Promise<ArkSessionEvent[]> {
+  try {
+    const search = buildListRecentSessionEventsSearch({ limit: params.limit });
+    const res = await axios.get<ListSessionEventsResponse | ArkSessionEvent[]>(
+      `${params.arkBaseUrl}/sessions/${encodeURIComponent(params.sessionId)}/events?${search}`,
+      {
+        headers: authHeaders(params.arkApiKey),
+        timeout: NO_TIMEOUT,
+        signal: params.signal,
+      },
+    );
+    return normalizeEventsPage(res.data).events;
   } catch (err) {
     throw toArkError(err);
   }

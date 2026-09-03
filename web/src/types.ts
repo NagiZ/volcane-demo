@@ -20,6 +20,12 @@ export interface RebuildSessionResult {
   sessionId: string;
 }
 
+export interface SessionMessagesResult {
+  ok: true;
+  sessionId: string | null;
+  messages: ChatMessage[];
+}
+
 export interface HealthResult {
   ok: true;
 }

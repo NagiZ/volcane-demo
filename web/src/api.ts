@@ -1,4 +1,4 @@
-import type { NormalizedSseEvent, RebuildSessionResult } from './types';
+import type { ChatMessage, NormalizedSseEvent, RebuildSessionResult, SessionMessagesResult } from './types';
 
 export class ApiError extends Error {
   readonly status: number;
@@ -143,6 +143,41 @@ export async function interruptSession(
   }
 
   return { ok: true, sessionId: body.sessionId };
+}
+
+export async function fetchSessionMessages(
+  webUserToken: string,
+  signal?: AbortSignal,
+  limit?: number,
+): Promise<SessionMessagesResult> {
+  const params = new URLSearchParams({ webUserToken });
+  if (limit != null) params.set('limit', String(limit));
+  const res = await fetch(`/api/agent/messages?${params.toString()}`, { signal });
+
+  if (!res.ok) {
+    throw new ApiError(res.status, await readJsonError(res, `拉取会话消息失败 (${res.status})`));
+  }
+
+  const body: unknown = await res.json();
+  if (!isRecord(body) || body.ok !== true || !Array.isArray(body.messages)) {
+    throw new ApiError(res.status, '会话消息响应格式异常');
+  }
+  if (body.sessionId != null && typeof body.sessionId !== 'string') {
+    throw new ApiError(res.status, '会话消息响应格式异常');
+  }
+
+  const messages: ChatMessage[] = [];
+  for (const item of body.messages) {
+    if (!isRecord(item) || typeof item.id !== 'string' || typeof item.content !== 'string') continue;
+    if (item.role !== 'user' && item.role !== 'agent') continue;
+    messages.push({ id: item.id, role: item.role, content: item.content });
+  }
+
+  return {
+    ok: true,
+    sessionId: typeof body.sessionId === 'string' ? body.sessionId : null,
+    messages,
+  };
 }
 
 export interface StreamChatParams {
