@@ -6,12 +6,38 @@ export type NormalizedSseEvent =
 
 export type ChatRole = 'user' | 'agent' | 'error';
 
+export interface ChatAttachment {
+  file_id: string;
+  name: string;
+  inline?: boolean;
+}
+
 export interface ChatMessage {
   id: string;
   role: ChatRole;
   content: string;
   /** 仅 error 角色使用 */
   code?: string;
+  attachments?: ChatAttachment[];
+}
+
+export interface OutputFileItem {
+  file_id: string;
+  name: string;
+  size: number;
+  download_url: string | null;
+}
+
+export interface OutputFilesResult {
+  ok: true;
+  sessionId: string | null;
+  files: OutputFileItem[];
+}
+
+export interface UploadFileResult {
+  file_id: string;
+  name: string;
+  size: number;
 }
 
 export interface RebuildSessionResult {

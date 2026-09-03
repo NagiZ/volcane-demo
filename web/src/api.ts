@@ -1,4 +1,12 @@
-import type { ChatMessage, NormalizedSseEvent, RebuildSessionResult, SessionMessagesResult } from './types';
+import type {
+  ChatMessage,
+  NormalizedSseEvent,
+  OutputFileItem,
+  OutputFilesResult,
+  RebuildSessionResult,
+  SessionMessagesResult,
+  UploadFileResult,
+} from './types';
 
 export class ApiError extends Error {
   readonly status: number;
@@ -180,9 +188,80 @@ export async function fetchSessionMessages(
   };
 }
 
+export async function uploadAgentFile(
+  webUserToken: string,
+  file: File,
+  signal?: AbortSignal,
+): Promise<UploadFileResult> {
+  const form = new FormData();
+  form.append('webUserToken', webUserToken);
+  form.append('file', file);
+  const res = await fetch('/api/agent/upload-file', { method: 'POST', body: form, signal });
+  if (!res.ok) {
+    throw new ApiError(res.status, await readJsonError(res, `上传失败 (${res.status})`));
+  }
+  const body: unknown = await res.json();
+  if (
+    !isRecord(body) ||
+    typeof body.file_id !== 'string' ||
+    typeof body.name !== 'string' ||
+    typeof body.size !== 'number'
+  ) {
+    throw new ApiError(res.status, '上传响应格式异常');
+  }
+  return { file_id: body.file_id, name: body.name, size: body.size };
+}
+
+export async function fetchOutputFiles(
+  webUserToken: string,
+  signal?: AbortSignal,
+): Promise<OutputFilesResult> {
+  const params = new URLSearchParams({ webUserToken });
+  const res = await fetch(`/api/agent/output-files?${params}`, { signal });
+  if (!res.ok) {
+    throw new ApiError(res.status, await readJsonError(res, `拉取产物失败 (${res.status})`));
+  }
+  const body: unknown = await res.json();
+  if (!isRecord(body) || body.ok !== true || !Array.isArray(body.files)) {
+    throw new ApiError(res.status, '产物列表响应格式异常');
+  }
+  if (body.sessionId != null && typeof body.sessionId !== 'string') {
+    throw new ApiError(res.status, '产物列表响应格式异常');
+  }
+
+  const files: OutputFileItem[] = [];
+  for (const item of body.files) {
+    if (
+      !isRecord(item) ||
+      typeof item.file_id !== 'string' ||
+      typeof item.name !== 'string' ||
+      typeof item.size !== 'number'
+    ) {
+      continue;
+    }
+    const downloadUrl = item.download_url;
+    if (downloadUrl != null && typeof downloadUrl !== 'string') continue;
+    files.push({
+      file_id: item.file_id,
+      name: item.name,
+      size: item.size,
+      download_url: typeof downloadUrl === 'string' ? downloadUrl : null,
+    });
+  }
+
+  return {
+    ok: true,
+    sessionId: typeof body.sessionId === 'string' ? body.sessionId : null,
+    files,
+  };
+}
+
 export interface StreamChatParams {
   webUserToken: string;
   userMessage: string;
+  file_ids?: string[];
+  inline_file_ids?: string[];
+  file_names?: Record<string, string>;
   signal?: AbortSignal;
   onEvent: (event: NormalizedSseEvent) => void;
 }
@@ -192,13 +271,24 @@ export interface StreamChatParams {
  * 用 fetch + ReadableStream 手动 UTF-8 解码，再按 `\n\n` 分包。
  */
 export async function streamChat(params: StreamChatParams): Promise<void> {
+  const payload: Record<string, unknown> = {
+    webUserToken: params.webUserToken,
+    userMessage: params.userMessage,
+  };
+  if (params.file_ids != null && params.file_ids.length > 0) {
+    payload.file_ids = params.file_ids;
+  }
+  if (params.inline_file_ids != null && params.inline_file_ids.length > 0) {
+    payload.inline_file_ids = params.inline_file_ids;
+  }
+  if (params.file_names != null && Object.keys(params.file_names).length > 0) {
+    payload.file_names = params.file_names;
+  }
+
   const res = await fetch('/api/agent/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      webUserToken: params.webUserToken,
-      userMessage: params.userMessage,
-    }),
+    body: JSON.stringify(payload),
     signal: params.signal,
   });
 
