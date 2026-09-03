@@ -14,6 +14,8 @@ export interface SendEventParams {
   arkBaseUrl: string;
   sessionId: string;
   userMessage: string;
+  mountedPaths?: string[];
+  inlineFileIds?: string[];
   signal?: AbortSignal;
 }
 
@@ -30,16 +32,23 @@ export interface ArkTextContentBlock {
   text: string;
 }
 
+export interface ArkFileContentBlock {
+  type: 'file';
+  file_id: string;
+}
+
+export type ArkMessageContentBlock = ArkTextContentBlock | ArkFileContentBlock;
+
 /** 单个会话事件（user.message / agent.message / session.status_idle 等） */
 export interface ArkSessionEvent {
   id?: string;
   type: string;
-  content?: string | ArkTextContentBlock[];
+  content?: string | ArkMessageContentBlock[];
 }
 
 /** POST /sessions/{id}/events 请求体：事件必须包在 events 数组内 */
 export type ArkOutboundEvent =
-  | { type: 'user.message'; content: ArkTextContentBlock[] }
+  | { type: 'user.message'; content: ArkMessageContentBlock[] }
   | { type: 'user.interrupt' };
 
 export interface SendSessionEventsRequestBody {
@@ -58,4 +67,43 @@ export interface ListSessionEventsResponse {
 
 export interface CreateSessionResponse {
   id: string;
+}
+
+export interface ArkFileInfo {
+  file_id: string;
+  name: string;
+  size: number;
+  download_url?: string;
+}
+
+export interface UploadArkFileParams {
+  arkApiKey: string;
+  arkBaseUrl: string;
+  fileBuffer: Buffer;
+  originalName: string;
+  contentType?: string;
+}
+
+export interface MountFileParams {
+  arkApiKey: string;
+  arkBaseUrl: string;
+  sessionId: string;
+  fileId: string;
+  /** 传给方舟的 mount_path，形如 `/report.pdf` */
+  mountPath: string;
+  signal?: AbortSignal;
+}
+
+export interface ListFilesParams {
+  arkApiKey: string;
+  arkBaseUrl: string;
+  scopeId: string;
+  signal?: AbortSignal;
+}
+
+export interface GetFileParams {
+  arkApiKey: string;
+  arkBaseUrl: string;
+  fileId: string;
+  signal?: AbortSignal;
 }
