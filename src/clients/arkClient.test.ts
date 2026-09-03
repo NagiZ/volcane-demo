@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   buildCreateSessionBody,
+  buildMountFileBody,
   buildSendInterruptBody,
   buildSendSessionEventsBody,
   buildSessionEventsStreamUrl,
@@ -37,7 +38,7 @@ describe('buildCreateSessionBody', () => {
 
 describe('buildSendSessionEventsBody', () => {
   it('wraps user.message in events array per Ark API', () => {
-    const body = buildSendSessionEventsBody('你好');
+    const body = buildSendSessionEventsBody({ userMessage: '你好' });
 
     expect(body).toEqual({
       events: [
@@ -49,6 +50,33 @@ describe('buildSendSessionEventsBody', () => {
     });
     expect(body).not.toHaveProperty('type');
     expect(body).not.toHaveProperty('content');
+  });
+});
+
+describe('buildSendSessionEventsBody with files', () => {
+  it('appends mount path hint and file blocks', () => {
+    const body = buildSendSessionEventsBody({
+      userMessage: '分析',
+      mountedPaths: ['/mnt/session/uploads/a.pdf'],
+      inlineFileIds: ['file-1'],
+    });
+    const event = body.events[0];
+    expect(event.type).toBe('user.message');
+    const content = (event as unknown as { content: Array<Record<string, unknown>> }).content;
+    expect(content[0]).toEqual({ type: 'text', text: '分析' });
+    expect(content[1]).toMatchObject({ type: 'text' });
+    expect(String((content[1] as { text: string }).text)).toContain('/mnt/session/uploads/a.pdf');
+    expect(content[2]).toEqual({ type: 'file', file_id: 'file-1' });
+  });
+});
+
+describe('buildMountFileBody', () => {
+  it('matches Ark session resources shape', () => {
+    expect(buildMountFileBody('file-1', '/a.pdf')).toEqual({
+      type: 'file',
+      file_id: 'file-1',
+      mount_path: '/a.pdf',
+    });
   });
 });
 

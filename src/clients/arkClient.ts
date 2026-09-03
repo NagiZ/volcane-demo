@@ -1,14 +1,20 @@
 import axios, { AxiosError, type AxiosResponse } from 'axios';
 import type { Readable } from 'node:stream';
 import type {
+  ArkFileInfo,
+  ArkMessageContentBlock,
   CreateSessionParams,
   CreateSessionResponse,
+  GetFileParams,
+  ListFilesParams,
   ListSessionEventsParams,
   ListSessionEventsResponse,
+  MountFileParams,
   SendEventParams,
   SendSessionEventsRequestBody,
   SendSessionEventsResponse,
   ArkSessionEvent,
+  UploadArkFileParams,
 } from '../types/ark.js';
 import { buildListRecentSessionEventsSearch } from '../utils/sessionHistory.js';
 
@@ -98,15 +104,29 @@ export function buildCreateSessionBody(params: CreateSessionParams): Record<stri
 }
 
 /** 构造发送事件请求体：官方要求 events 数组包裹 */
-export function buildSendSessionEventsBody(userMessage: string): SendSessionEventsRequestBody {
+export function buildSendSessionEventsBody(input: {
+  userMessage: string;
+  mountedPaths?: string[];
+  inlineFileIds?: string[];
+}): SendSessionEventsRequestBody {
+  const content: ArkMessageContentBlock[] = [{ type: 'text', text: input.userMessage }];
+  const paths = input.mountedPaths?.filter((p) => p.trim().length > 0) ?? [];
+  if (paths.length > 0) {
+    content.push({
+      type: 'text',
+      text: `已挂载到会话沙箱的文件：\n${paths.map((p) => `- ${p}`).join('\n')}`,
+    });
+  }
+  for (const fileId of input.inlineFileIds ?? []) {
+    if (fileId.trim()) content.push({ type: 'file', file_id: fileId.trim() });
+  }
   return {
-    events: [
-      {
-        type: 'user.message',
-        content: [{ type: 'text', text: userMessage }],
-      },
-    ],
+    events: [{ type: 'user.message', content }],
   };
+}
+
+export function buildMountFileBody(fileId: string, mountPath: string) {
+  return { type: 'file' as const, file_id: fileId, mount_path: mountPath };
 }
 
 /** 构造中止事件请求体。官方：执行中发送 `user.interrupt` 暂停 Agent。 */
@@ -226,7 +246,11 @@ export async function sendSessionEvent(params: SendEventParams): Promise<SendSes
   try {
     const res = await axios.post<SendSessionEventsResponse>(
       `${params.arkBaseUrl}/sessions/${encodeURIComponent(params.sessionId)}/events`,
-      buildSendSessionEventsBody(params.userMessage),
+      buildSendSessionEventsBody({
+        userMessage: params.userMessage,
+        mountedPaths: params.mountedPaths,
+        inlineFileIds: params.inlineFileIds,
+      }),
       {
         headers: authHeaders(params.arkApiKey),
         timeout: NO_TIMEOUT,
@@ -297,5 +321,101 @@ export async function tryStreamSessionEvents(
     return res.data;
   } catch {
     return null;
+  }
+}
+
+export function normalizeArkFile(raw: unknown): ArkFileInfo | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const o = raw as Record<string, unknown>;
+  const file_id =
+    (typeof o.id === 'string' && o.id) ||
+    (typeof o.file_id === 'string' && o.file_id) ||
+    '';
+  const name =
+    (typeof o.filename === 'string' && o.filename) ||
+    (typeof o.name === 'string' && o.name) ||
+    file_id;
+  const sizeRaw = o.bytes ?? o.size ?? o.size_bytes;
+  const size = typeof sizeRaw === 'number' ? sizeRaw : Number(sizeRaw);
+  if (!file_id) return null;
+  const download_url =
+    typeof o.download_url === 'string'
+      ? o.download_url
+      : typeof o.url === 'string'
+        ? o.url
+        : undefined;
+  return {
+    file_id,
+    name,
+    size: Number.isFinite(size) ? size : 0,
+    ...(download_url ? { download_url } : {}),
+  };
+}
+
+export async function uploadArkFile(params: UploadArkFileParams): Promise<ArkFileInfo> {
+  try {
+    const form = new FormData();
+    form.append('purpose', 'agent');
+    const file = new File([new Uint8Array(params.fileBuffer)], params.originalName, {
+      type: params.contentType || 'application/octet-stream',
+    });
+    form.append('file', file);
+    const res = await axios.post(`${params.arkBaseUrl}/files`, form, {
+      headers: { Authorization: `Bearer ${params.arkApiKey}` },
+      timeout: NO_TIMEOUT,
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity,
+    });
+    const info = normalizeArkFile(res.data);
+    if (!info) throw new ArkApiError('Upload file response missing id');
+    return info;
+  } catch (err) {
+    throw toArkError(err);
+  }
+}
+
+export async function getArkFile(params: GetFileParams): Promise<ArkFileInfo> {
+  try {
+    const res = await axios.get(
+      `${params.arkBaseUrl}/files/${encodeURIComponent(params.fileId)}`,
+      { headers: authHeaders(params.arkApiKey), timeout: NO_TIMEOUT, signal: params.signal },
+    );
+    const info = normalizeArkFile(res.data);
+    if (!info) throw new ArkApiError('Get file response missing id');
+    return info;
+  } catch (err) {
+    throw toArkError(err);
+  }
+}
+
+export async function mountFileToSession(params: MountFileParams): Promise<void> {
+  try {
+    await axios.post(
+      `${params.arkBaseUrl}/sessions/${encodeURIComponent(params.sessionId)}/resources`,
+      buildMountFileBody(params.fileId, params.mountPath),
+      { headers: authHeaders(params.arkApiKey), timeout: NO_TIMEOUT, signal: params.signal },
+    );
+  } catch (err) {
+    throw toArkError(err);
+  }
+}
+
+export async function listSessionOutputFiles(params: ListFilesParams): Promise<ArkFileInfo[]> {
+  try {
+    const res = await axios.get(`${params.arkBaseUrl}/files`, {
+      headers: authHeaders(params.arkApiKey),
+      timeout: NO_TIMEOUT,
+      signal: params.signal,
+      params: { scope_id: params.scopeId },
+    });
+    const data = res.data;
+    const list = Array.isArray(data)
+      ? data
+      : data && typeof data === 'object' && Array.isArray((data as { data?: unknown }).data)
+        ? (data as { data: unknown[] }).data
+        : [];
+    return list.map(normalizeArkFile).filter((x): x is ArkFileInfo => x != null);
+  } catch (err) {
+    throw toArkError(err);
   }
 }
