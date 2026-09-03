@@ -30,6 +30,15 @@ export class SessionService {
     return { tokenHash, sessionId };
   }
 
+  async getExistingSession(
+    webUserToken: string,
+  ): Promise<{ tokenHash: string; sessionId: string } | null> {
+    const { tokenHash } = resolveUserKey(webUserToken);
+    const existing = await this.store.getSessionId(tokenHash);
+    if (!existing) return null;
+    return { tokenHash, sessionId: existing };
+  }
+
   async rebuildSession(webUserToken: string): Promise<{ tokenHash: string; sessionId: string }> {
     const { tokenHash } = resolveUserKey(webUserToken);
     await this.store.deleteSession(tokenHash);

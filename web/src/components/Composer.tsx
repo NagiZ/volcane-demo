@@ -2,16 +2,19 @@ import { useState, type KeyboardEvent } from 'react';
 
 interface ComposerProps {
   disabled: boolean;
+  streaming: boolean;
+  interrupting: boolean;
   onSend: (text: string) => void;
+  onAbort: () => void;
 }
 
-export function Composer({ disabled, onSend }: ComposerProps) {
+export function Composer({ disabled, streaming, interrupting, onSend, onAbort }: ComposerProps) {
   const [draft, setDraft] = useState('');
-  const canSend = !disabled && draft.trim().length > 0;
+  const canSend = !disabled && !streaming && draft.trim().length > 0;
 
   function submit() {
     const text = draft.trim();
-    if (disabled || text.length === 0) return;
+    if (disabled || streaming || text.length === 0) return;
     onSend(text);
     setDraft('');
   }
@@ -39,9 +42,15 @@ export function Composer({ disabled, onSend }: ComposerProps) {
         onKeyDown={onKeyDown}
         placeholder="输入消息。Enter 发送，Shift+Enter 换行"
       />
-      <button type="submit" className="btn btn--ember" disabled={!canSend}>
-        {disabled ? '等待回复' : '发送'}
-      </button>
+      {streaming ? (
+        <button type="button" className="btn btn--abort" onClick={onAbort} disabled={interrupting}>
+          {interrupting ? '中止中…' : '中止'}
+        </button>
+      ) : (
+        <button type="submit" className="btn btn--ember" disabled={!canSend}>
+          发送
+        </button>
+      )}
     </form>
   );
 }

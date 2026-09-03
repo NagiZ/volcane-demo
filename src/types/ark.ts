@@ -38,11 +38,12 @@ export interface ArkSessionEvent {
 }
 
 /** POST /sessions/{id}/events 请求体：事件必须包在 events 数组内 */
+export type ArkOutboundEvent =
+  | { type: 'user.message'; content: ArkTextContentBlock[] }
+  | { type: 'user.interrupt' };
+
 export interface SendSessionEventsRequestBody {
-  events: Array<{
-    type: 'user.message';
-    content: ArkTextContentBlock[];
-  }>;
+  events: ArkOutboundEvent[];
 }
 
 export interface SendSessionEventsResponse {
@@ -51,6 +52,8 @@ export interface SendSessionEventsResponse {
 
 export interface ListSessionEventsResponse {
   data?: ArkSessionEvent[];
+  /** 下一页游标；空或不下发表示已到最后一页 */
+  next_page?: string | null;
 }
 
 export interface CreateSessionResponse {

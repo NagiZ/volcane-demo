@@ -13,10 +13,14 @@ async function main() {
   const chatService = new ChatService(config, sessionService);
 
   const app = createApp({ config, chatService, sessionService });
-  app.listen(config.port, () => {
+  const server = app.listen(config.port, () => {
     // DEBUG: 仅打印端口；禁止打印密钥
     console.log(`Server listening on http://127.0.0.1:${config.port}`);
   });
+  // Node 18+ 默认 requestTimeout=300000；SSE 长对话需关闭这些限制
+  server.requestTimeout = 0;
+  server.headersTimeout = 0;
+  server.timeout = 0;
 }
 
 main().catch((err) => {

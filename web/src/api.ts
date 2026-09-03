@@ -122,6 +122,29 @@ export async function rebuildSession(
   };
 }
 
+export async function interruptSession(
+  webUserToken: string,
+  signal?: AbortSignal,
+): Promise<{ ok: true; sessionId: string }> {
+  const res = await fetch('/api/agent/interrupt', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ webUserToken }),
+    signal,
+  });
+
+  if (!res.ok) {
+    throw new ApiError(res.status, await readJsonError(res, `中止对话失败 (${res.status})`));
+  }
+
+  const body: unknown = await res.json();
+  if (!isRecord(body) || body.ok !== true || typeof body.sessionId !== 'string') {
+    throw new ApiError(res.status, '中止对话响应格式异常');
+  }
+
+  return { ok: true, sessionId: body.sessionId };
+}
+
 export interface StreamChatParams {
   webUserToken: string;
   userMessage: string;

@@ -10,8 +10,9 @@ export default defineConfig({
       '/api': {
         target: 'http://127.0.0.1:3000',
         changeOrigin: true,
-        timeout: 600_000,
-        proxyTimeout: 600_000,
+        // 0 = 不限制；对话可能持续数十分钟
+        timeout: 0,
+        proxyTimeout: 0,
       },
       '/health': {
         target: 'http://127.0.0.1:3000',

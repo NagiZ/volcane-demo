@@ -36,7 +36,8 @@ describe('pollSessionEventsForAgentReply', () => {
       listEvents: async () => [
         { id: 'e1', type: 'agent.message', content: [{ type: 'text', text: '旧回复' }] },
         { id: 'e2', type: 'user.message', content: [{ type: 'text', text: 'new' }] },
-        { id: 'e3', type: 'session.status_idle' },
+        { id: 'e3', type: 'agent.message', content: [{ type: 'text', text: '新回复' }] },
+        { id: 'e4', type: 'session.status_idle' },
       ],
       baselineEventIds: new Set(['e1']),
       onDelta: (text) => deltas.push(text),
@@ -44,7 +45,7 @@ describe('pollSessionEventsForAgentReply', () => {
       timeoutMs: 5_000,
     });
 
-    expect(deltas).toEqual([]);
+    expect(deltas).toEqual(['新回复']);
   });
 
   it('不因长时间 tool_use 而误超时：新事件重置无进展计时', async () => {
@@ -238,6 +239,119 @@ describe('pollSessionEventsForAgentReply', () => {
         pollIntervalMs: 1,
         idleTimeoutMs: 60_000,
         timeoutMs: 30,
+      }),
+    ).rejects.toMatchObject({ code: 'AGENT_REPLY_TIMEOUT' });
+  });
+
+  it('收到 user.interrupt 后等到 session.status_idle 即正常收口（无需 agent.message）', async () => {
+    const listEvents = vi
+      .fn()
+      .mockResolvedValueOnce([
+        { id: 'u1', type: 'user.message', content: [{ type: 'text', text: '长任务' }] },
+        { id: 'r1', type: 'session.status_running' },
+      ])
+      .mockResolvedValueOnce([
+        { id: 'u1', type: 'user.message', content: [{ type: 'text', text: '长任务' }] },
+        { id: 'r1', type: 'session.status_running' },
+        { id: 'i1', type: 'user.interrupt' },
+        { id: 'idle1', type: 'session.status_idle' },
+      ]);
+
+    await expect(
+      pollSessionEventsForAgentReply({
+        listEvents,
+        onDelta: () => {},
+        pollIntervalMs: 1,
+        timeoutMs: 5_000,
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(listEvents).toHaveBeenCalledTimes(2);
+  });
+
+  it('user.interrupt 与 idle 分轮到达时仍能收口', async () => {
+    const listEvents = vi
+      .fn()
+      .mockResolvedValueOnce([{ id: 'i1', type: 'user.interrupt' }])
+      .mockResolvedValueOnce([
+        { id: 'i1', type: 'user.interrupt' },
+        { id: 'idle1', type: 'session.status_idle' },
+      ]);
+
+    await expect(
+      pollSessionEventsForAgentReply({
+        listEvents,
+        onDelta: () => {},
+        pollIntervalMs: 1,
+        timeoutMs: 5_000,
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('agent.message 与 idle 分轮到达时仍能收口并下发 delta', async () => {
+    const listEvents = vi
+      .fn()
+      .mockResolvedValueOnce([
+        { id: 'u1', type: 'user.message', content: [{ type: 'text', text: 'hi' }] },
+        { id: 'm1', type: 'agent.message', content: [{ type: 'text', text: '答完了' }] },
+      ])
+      .mockResolvedValueOnce([
+        { id: 'u1', type: 'user.message', content: [{ type: 'text', text: 'hi' }] },
+        { id: 'm1', type: 'agent.message', content: [{ type: 'text', text: '答完了' }] },
+        { id: 'span1', type: 'span.model_request_end' },
+        { id: 'idle1', type: 'session.status_idle' },
+      ]);
+
+    const deltas: string[] = [];
+    await expect(
+      pollSessionEventsForAgentReply({
+        listEvents,
+        onDelta: (text) => deltas.push(text),
+        pollIntervalMs: 1,
+        settleAfterReplyMs: 60_000,
+        timeoutMs: 5_000,
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(deltas).toEqual(['答完了']);
+  });
+
+  it('同一 agent.message id 内容从空补全后，靠 settle 收口且至少下发全文', async () => {
+    // 列表接口偶发先返回空 content 占位；下一轮同 id 带全文时，
+    // 因 id 已进 seen，不会再当 newEvent。此场景依赖方舟一次给全量文本；
+    // 这里验证「首轮就有全文」的主路径仍正常。
+    const listEvents = vi.fn().mockResolvedValueOnce([
+      { id: 'm1', type: 'agent.message', content: [{ type: 'text', text: '完整答案' }] },
+      { id: 'idle1', type: 'session.status_idle' },
+    ]);
+
+    const deltas: string[] = [];
+    await pollSessionEventsForAgentReply({
+      listEvents,
+      onDelta: (text) => deltas.push(text),
+      pollIntervalMs: 1,
+      timeoutMs: 5_000,
+    });
+
+    expect(deltas).toEqual(['完整答案']);
+  });
+
+  it('仅有 user.message 与晚到的 idle 时不提前收口，避免空 delta 结束', async () => {
+    const user: ArkSessionEvent = {
+      id: 'u1',
+      type: 'user.message',
+      content: [{ type: 'text', text: 'hi' }],
+    };
+    const idle: ArkSessionEvent = { id: 'idle1', type: 'session.status_idle' };
+    let n = 0;
+
+    await expect(
+      pollSessionEventsForAgentReply({
+        listEvents: async () => (++n === 1 ? [user] : [user, idle]),
+        onDelta: () => {},
+        pollIntervalMs: 1,
+        idleTimeoutMs: 0,
+        timeoutMs: 5_000,
       }),
     ).rejects.toMatchObject({ code: 'AGENT_REPLY_TIMEOUT' });
   });

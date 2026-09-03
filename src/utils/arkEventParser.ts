@@ -5,18 +5,23 @@ export function extractTextFromEventContent(content: unknown): string | null {
   if (typeof content === 'string' && content.length > 0) {
     return content;
   }
+  if (content && typeof content === 'object' && !Array.isArray(content)) {
+    return extractTextFromEventContent([content]);
+  }
   if (!Array.isArray(content)) return null;
 
   const parts: string[] = [];
   for (const part of content) {
     if (!part || typeof part !== 'object') continue;
     const block = part as Record<string, unknown>;
-    if (
-      (block.type === 'text' || block.type === 'output_text') &&
-      typeof block.text === 'string' &&
-      block.text.length > 0
-    ) {
+    if (block.type === 'thinking' || block.type === 'agent.thinking') continue;
+    if (typeof block.text === 'string' && block.text.length > 0) {
       parts.push(block.text);
+      continue;
+    }
+    if (block.text && typeof block.text === 'object') {
+      const nested = (block.text as Record<string, unknown>).value;
+      if (typeof nested === 'string' && nested.length > 0) parts.push(nested);
     }
   }
   return parts.length > 0 ? parts.join('') : null;
@@ -35,7 +40,15 @@ export function extractTextDeltaFromArkEvent(raw: unknown): string | null {
 
   if (type === 'agent.thinking') return null;
   if (type === 'agent.message') {
-    return extractTextFromEventContent(event.content);
+    const fromContent = extractTextFromEventContent(event.content);
+    if (fromContent) return fromContent;
+    if (typeof event.text === 'string' && event.text.length > 0) return event.text;
+    const nested = event.message;
+    if (nested && typeof nested === 'object') {
+      const fromNested = extractTextFromEventContent((nested as Record<string, unknown>).content);
+      if (fromNested) return fromNested;
+    }
+    return null;
   }
 
   if (typeof event.delta === 'string' && event.delta.length > 0) {
@@ -56,6 +69,11 @@ export function isAgentMessageEvent(raw: unknown): boolean {
 /** 是否为会话进入 idle 的状态事件 */
 export function isSessionIdleEvent(raw: unknown): boolean {
   return Boolean(raw && typeof raw === 'object' && (raw as Record<string, unknown>).type === 'session.status_idle');
+}
+
+/** 是否为用户中止事件（官方 user.interrupt） */
+export function isUserInterruptEvent(raw: unknown): boolean {
+  return Boolean(raw && typeof raw === 'object' && (raw as Record<string, unknown>).type === 'user.interrupt');
 }
 
 /** 生成事件去重 key（优先 id） */

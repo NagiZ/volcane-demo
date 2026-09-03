@@ -25,6 +25,9 @@ export class ArkApiError extends Error {
   }
 }
 
+/** axios `timeout: 0` 表示不限制；长对话由 AbortSignal / 连接断开收口。 */
+const NO_TIMEOUT = 0;
+
 function authHeaders(apiKey: string) {
   return {
     Authorization: `Bearer ${apiKey}`,
@@ -57,6 +60,9 @@ function readArkErrorPayload(data: unknown): { message: string; code?: string } 
 function toArkError(err: unknown): ArkApiError {
   if (err instanceof ArkApiError) return err;
   if (err instanceof AxiosError) {
+    if (err.code === 'ERR_CANCELED' || err.name === 'CanceledError') {
+      return new ArkApiError('Request aborted', { code: 'ABORTED' });
+    }
     const status = err.response?.status;
     const { message, code } = readArkErrorPayload(err.response?.data);
     const lower = `${message} ${code ?? ''}`.toLowerCase();
@@ -102,13 +108,20 @@ export function buildSendSessionEventsBody(userMessage: string): SendSessionEven
   };
 }
 
+/** 构造中止事件请求体。官方：执行中发送 `user.interrupt` 暂停 Agent。 */
+export function buildSendInterruptBody(): SendSessionEventsRequestBody {
+  return {
+    events: [{ type: 'user.interrupt' }],
+  };
+}
+
 /** 创建 Ark Managed Agent Session（environment_with_overrides 全量 env） */
 export async function createArkSession(params: CreateSessionParams): Promise<{ sessionId: string }> {
   try {
     const res = await axios.post<CreateSessionResponse>(
       `${params.arkBaseUrl}/sessions`,
       buildCreateSessionBody(params),
-      { headers: authHeaders(params.arkApiKey), timeout: 30_000 },
+      { headers: authHeaders(params.arkApiKey), timeout: NO_TIMEOUT },
     );
     if (!res.data?.id) throw new ArkApiError('Create session response missing id');
     return { sessionId: res.data.id };
@@ -117,23 +130,65 @@ export async function createArkSession(params: CreateSessionParams): Promise<{ s
   }
 }
 
-function normalizeEventsResponse(data: ListSessionEventsResponse | ArkSessionEvent[]): ArkSessionEvent[] {
-  if (Array.isArray(data)) return data;
-  return data.data ?? [];
+/** 方舟列表默认只返回前 50 条；单页上限实测为 200。 */
+export const SESSION_EVENTS_PAGE_LIMIT = 200;
+const SESSION_EVENTS_MAX_PAGES = 100;
+
+export interface SessionEventsPage {
+  events: ArkSessionEvent[];
+  nextPage?: string | null;
 }
 
-/** 查询会话事件列表（JSON）— 官方「查询会话事件列表」 */
+/**
+ * 跟随 next_page 拉完全量事件。
+ * 长任务的 agent.message / session.status_idle 常落在第二页及以后；
+ * 只读首页时轮询会永远看不到结束，Web 卡在「正在输入…」。
+ */
+export async function collectPagedSessionEvents(
+  fetchPage: (cursor?: string) => Promise<SessionEventsPage>,
+  options?: { maxPages?: number },
+): Promise<ArkSessionEvent[]> {
+  const maxPages = options?.maxPages ?? SESSION_EVENTS_MAX_PAGES;
+  const all: ArkSessionEvent[] = [];
+  let cursor: string | undefined;
+
+  for (let i = 0; i < maxPages; i++) {
+    const page = await fetchPage(cursor);
+    all.push(...(page.events ?? []));
+    const next = page.nextPage;
+    if (!next) return all;
+    cursor = next;
+  }
+
+  return all;
+}
+
+function normalizeEventsPage(data: ListSessionEventsResponse | ArkSessionEvent[]): SessionEventsPage {
+  if (Array.isArray(data)) {
+    return { events: data, nextPage: null };
+  }
+  const next = typeof data.next_page === 'string' && data.next_page.length > 0 ? data.next_page : null;
+  return { events: data.data ?? [], nextPage: next };
+}
+
+/** 查询会话事件列表（JSON）— 官方「查询会话事件列表」；自动翻页。 */
 export async function listSessionEvents(params: ListSessionEventsParams): Promise<ArkSessionEvent[]> {
   try {
-    const res = await axios.get<ListSessionEventsResponse | ArkSessionEvent[]>(
-      `${params.arkBaseUrl}/sessions/${encodeURIComponent(params.sessionId)}/events`,
-      {
-        headers: authHeaders(params.arkApiKey),
-        timeout: 30_000,
-        signal: params.signal,
-      },
-    );
-    return normalizeEventsResponse(res.data);
+    return await collectPagedSessionEvents(async (cursor) => {
+      const res = await axios.get<ListSessionEventsResponse | ArkSessionEvent[]>(
+        `${params.arkBaseUrl}/sessions/${encodeURIComponent(params.sessionId)}/events`,
+        {
+          headers: authHeaders(params.arkApiKey),
+          timeout: NO_TIMEOUT,
+          signal: params.signal,
+          params: {
+            limit: SESSION_EVENTS_PAGE_LIMIT,
+            ...(cursor ? { page: cursor } : {}),
+          },
+        },
+      );
+      return normalizeEventsPage(res.data);
+    });
   } catch (err) {
     throw toArkError(err);
   }
@@ -150,7 +205,30 @@ export async function sendSessionEvent(params: SendEventParams): Promise<SendSes
       buildSendSessionEventsBody(params.userMessage),
       {
         headers: authHeaders(params.arkApiKey),
-        timeout: 30_000,
+        timeout: NO_TIMEOUT,
+        signal: params.signal,
+      },
+    );
+    return res.data;
+  } catch (err) {
+    throw toArkError(err);
+  }
+}
+
+/**
+ * 向 Session 发送 user.interrupt，暂停正在执行的 Agent。
+ * 官方「发送会话事件」；投递后须等 session.status_idle 才算停稳。
+ */
+export async function sendSessionInterrupt(
+  params: Omit<SendEventParams, 'userMessage'>,
+): Promise<SendSessionEventsResponse> {
+  try {
+    const res = await axios.post<SendSessionEventsResponse>(
+      `${params.arkBaseUrl}/sessions/${encodeURIComponent(params.sessionId)}/events`,
+      buildSendInterruptBody(),
+      {
+        headers: authHeaders(params.arkApiKey),
+        timeout: NO_TIMEOUT,
         signal: params.signal,
       },
     );
@@ -176,7 +254,7 @@ export async function tryStreamSessionEvents(
           Accept: 'text/event-stream',
         },
         responseType: 'stream',
-        timeout: 0,
+        timeout: NO_TIMEOUT,
         signal: params.signal,
         validateStatus: (status) => status >= 200 && status < 300,
       },

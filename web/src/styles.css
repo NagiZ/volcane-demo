@@ -218,6 +218,16 @@ body::before {
   filter: brightness(1.06);
 }
 
+.btn--abort {
+  background: var(--danger-bg);
+  border-color: var(--danger-line);
+  color: #ffb4ab;
+}
+
+.btn--abort:hover {
+  filter: brightness(1.08);
+}
+
 .stage {
   min-height: 0;
   overflow: auto;

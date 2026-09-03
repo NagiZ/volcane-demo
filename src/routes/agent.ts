@@ -1,4 +1,5 @@
 import { Router, type Request, type Response } from 'express';
+import { ArkApiError } from '../clients/arkClient.js';
 import type { ChatService } from '../services/chatService.js';
 import type { SessionService } from '../services/sessionService.js';
 
@@ -32,6 +33,23 @@ export function createAgentRouter(deps: {
         });
       }
       if (!res.writableEnded) res.end();
+    }
+  });
+
+  router.post('/interrupt', async (req: Request, res: Response) => {
+    const tokenErr = requireNonEmptyString(req.body?.webUserToken, 'webUserToken');
+    if (tokenErr) return res.status(400).json({ error: tokenErr });
+
+    try {
+      const result = await deps.chatService.interruptChat(req.body.webUserToken.trim());
+      return res.status(200).json({ ok: true, ...result });
+    } catch (err) {
+      if (err instanceof ArkApiError && err.code === 'NO_SESSION') {
+        return res.status(404).json({ error: err.message });
+      }
+      return res.status(503).json({
+        error: err instanceof Error ? err.message : 'Interrupt failed',
+      });
     }
   });
 

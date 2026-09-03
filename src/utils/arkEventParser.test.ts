@@ -15,6 +15,10 @@ describe('extractTextFromEventContent', () => {
   it('extracts text blocks', () => {
     expect(extractTextFromEventContent([{ type: 'text', text: '你好' }])).toBe('你好');
   });
+
+  it('extracts a single content object', () => {
+    expect(extractTextFromEventContent({ type: 'text', text: '单块' })).toBe('单块');
+  });
 });
 
 describe('extractTextDeltaFromArkEvent', () => {
@@ -25,6 +29,18 @@ describe('extractTextDeltaFromArkEvent', () => {
         content: [{ type: 'text', text: '我是 Agent' }],
       }),
     ).toBe('我是 Agent');
+    expect(
+      extractTextDeltaFromArkEvent({
+        type: 'agent.message',
+        text: '顶层文本',
+      }),
+    ).toBe('顶层文本');
+    expect(
+      extractTextDeltaFromArkEvent({
+        type: 'agent.message',
+        message: { content: [{ type: 'text', text: '嵌套正文' }] },
+      }),
+    ).toBe('嵌套正文');
     expect(
       extractTextDeltaFromArkEvent({
         type: 'agent.thinking',

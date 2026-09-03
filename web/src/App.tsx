@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ApiError, fetchHealth, rebuildSession, streamChat } from './api';
+import { ApiError, fetchHealth, interruptSession, rebuildSession, streamChat } from './api';
 import { Composer } from './components/Composer';
 import { MessageList } from './components/MessageList';
 import { TokenBar } from './components/TokenBar';
@@ -11,6 +11,12 @@ const HEALTH_POLL_MS = 12_000;
 
 function nextId(): string {
   return crypto.randomUUID();
+}
+
+function isAbortError(err: unknown): boolean {
+  return err instanceof DOMException
+    ? err.name === 'AbortError'
+    : err instanceof Error && err.name === 'AbortError';
 }
 
 function readStoredToken(): string {
@@ -26,10 +32,12 @@ export function App() {
   const [streaming, setStreaming] = useState(false);
   const [waitingDelta, setWaitingDelta] = useState(false);
   const [rebuilding, setRebuilding] = useState(false);
+  const [interrupting, setInterrupting] = useState(false);
   const [backendStatus, setBackendStatus] = useState<BackendStatus>('checking');
   const [notice, setNotice] = useState<string | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
+  const interruptedRef = useRef(false);
 
   const busy = streaming || rebuilding;
 
@@ -73,6 +81,11 @@ export function App() {
 
   function handleTokenChange(value: string) {
     if (value === token) return;
+    if (streaming) {
+      void interruptSession(token.trim()).catch(() => {
+        // 换 token 时尽力停下旧 Session，失败不阻塞切换
+      });
+    }
     abortInFlight();
     setToken(value);
     localStorage.setItem(TOKEN_STORAGE_KEY, value);
@@ -110,6 +123,7 @@ export function App() {
     const agentId = nextId();
     let gotDelta = false;
     let gotError = false;
+    interruptedRef.current = false;
 
     setMessages((prev) => [...prev, user]);
     setNotice(null);
@@ -140,7 +154,13 @@ export function App() {
             return;
           }
 
+          if (event.type === 'done') {
+            setWaitingDelta(false);
+            return;
+          }
+
           if (event.type === 'error') {
+            if (event.code === 'ABORTED' || controller.signal.aborted) return;
             gotError = true;
             setWaitingDelta(false);
             setMessages((prev) => [
@@ -156,7 +176,10 @@ export function App() {
         },
       });
 
-      if (!controller.signal.aborted && !gotDelta && !gotError) {
+      if (interruptedRef.current) {
+        setNotice('已中止当次对话');
+        interruptedRef.current = false;
+      } else if (!controller.signal.aborted && !gotDelta && !gotError) {
         setMessages((prev) => [
           ...prev,
           {
@@ -168,7 +191,7 @@ export function App() {
         ]);
       }
     } catch (err) {
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted || isAbortError(err)) return;
       const message =
         err instanceof ApiError
           ? err.message
@@ -194,6 +217,25 @@ export function App() {
     }
   }
 
+  async function handleAbort() {
+    if (!streaming || interrupting) return;
+    const trimmed = token.trim();
+    if (trimmed.length === 0) return;
+    setInterrupting(true);
+    interruptedRef.current = true;
+    setNotice(null);
+    try {
+      await interruptSession(trimmed);
+      setNotice('已发送中止，等待 Agent 停下…');
+    } catch (err) {
+      interruptedRef.current = false;
+      const message = err instanceof ApiError ? err.message : '中止失败，请确认后端是否在线';
+      setNotice(message);
+    } finally {
+      setInterrupting(false);
+    }
+  }
+
   return (
     <div className="shell">
       <TokenBar
@@ -210,7 +252,15 @@ export function App() {
       <main className="stage">
         <MessageList messages={messages} waiting={waitingDelta} />
       </main>
-      <Composer disabled={busy} onSend={(text) => void handleSend(text)} />
+      <Composer
+        disabled={busy}
+        streaming={streaming}
+        interrupting={interrupting}
+        onSend={(text) => void handleSend(text)}
+        onAbort={() => {
+          void handleAbort();
+        }}
+      />
     </div>
   );
 }
