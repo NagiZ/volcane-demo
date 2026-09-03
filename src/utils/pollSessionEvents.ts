@@ -1,4 +1,5 @@
 import type { ArkSessionEvent } from '../types/ark.js';
+import type { CustomToolUse } from '../tools/types.js';
 import { ArkApiError } from '../clients/arkClient.js';
 import {
   extractTextDeltaFromArkEvent,
@@ -8,6 +9,8 @@ import {
   isToolUseEvent,
   isUserInterruptEvent,
   latestSessionLifecycle,
+  parseCustomToolUse,
+  parseRequiresActionIdle,
   sessionEventKey,
 } from './arkEventParser.js';
 
@@ -32,6 +35,16 @@ export interface PollSessionEventsParams {
    * 生产环境依赖 AbortSignal / 客户端断开收口。
    */
   timeoutMs?: number;
+  onTool?: (ev: {
+    tool_name: string;
+    call_id: string;
+    status: 'running' | 'done' | 'error';
+    message?: string;
+  }) => void;
+  onRequiresAction?: (
+    eventIds: string[],
+    pending: Map<string, CustomToolUse>,
+  ) => Promise<void>;
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -56,13 +69,15 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
  * POST 投递后轮询「查询会话事件列表」，将新增 agent.message 转为 SSE delta。
  *
  * 终止条件（任一成立即正常返回）：
- * 1. 出现 session.status_idle，且本轮见过 agent.message 或 user.interrupt；
+ * 1. 出现 session.status_idle（非 requires_action），且本轮见过 agent.message 或 user.interrupt；
  * 2. 已收到 agent.message、其后无未完成的工具调用，会话已不在 running，
  *    且此后 settleAfterReplyMs 内无新事件——方舟有时给出回复后迟迟不发 idle。
  *
  * ⚠️ 一轮内每个模型请求都会产生一条 agent.message。第一条不等于答完，
  * 会话仍为 session.status_running 时不得收口。
  * 必须跟踪 tool_use / tool_result（含 mcp 变体）配对。
+ * custom_tool_use 不计入 pendingToolCalls；requires_action idle 触发回调后继续轮询，
+ * 且在再次 status_running（或终态 idle）前禁止 settle / hard-deadline 成功收口。
  */
 export async function pollSessionEventsForAgentReply(params: PollSessionEventsParams): Promise<void> {
   const seen = new Set(params.baselineEventIds ?? []);
@@ -80,6 +95,9 @@ export async function pollSessionEventsForAgentReply(params: PollSessionEventsPa
   let interrupted = false;
   /** 已向下游写出的 agent.message 全文，用于同 id 内容补全时只推增量。 */
   const emittedTextById = new Map<string, string>();
+  const pendingCustomTools = new Map<string, CustomToolUse>();
+  /** requires_action 处理后等待 Agent 继续；见到 status_running 或终态 idle 前不得 settle。 */
+  let awaitingAfterRequiresAction = false;
 
   while (Date.now() < hardDeadline) {
     if (params.signal?.aborted) {
@@ -108,18 +126,43 @@ export async function pollSessionEventsForAgentReply(params: PollSessionEventsPa
 
     for (const event of newEvents) {
       seen.add(sessionEventKey(event));
+      if (event.type === 'session.status_running') {
+        awaitingAfterRequiresAction = false;
+      }
       if (isToolUseEvent(event)) pendingToolCalls++;
       else if (isToolResultEvent(event)) pendingToolCalls = Math.max(0, pendingToolCalls - 1);
       if (isUserInterruptEvent(event)) interrupted = true;
+
+      const custom = parseCustomToolUse(event);
+      if (custom) {
+        pendingCustomTools.set(custom.id, custom);
+        params.onTool?.({
+          tool_name: custom.name,
+          call_id: custom.id,
+          status: 'running',
+        });
+      }
+
+      const requires = parseRequiresActionIdle(event);
+      if (requires && params.onRequiresAction) {
+        await params.onRequiresAction(requires.eventIds, pendingCustomTools);
+        awaitingAfterRequiresAction = true;
+        lastProgressAt = Date.now();
+      }
     }
 
-    const hasNewIdle = newEvents.some(isSessionIdleEvent);
+    const hasNewTerminalIdle = newEvents.some((e) => {
+      if (!isSessionIdleEvent(e)) return false;
+      return parseRequiresActionIdle(e) == null;
+    });
     const sessionLifecycle = latestSessionLifecycle(events);
+    const blockedByCustomTool =
+      awaitingAfterRequiresAction || pendingCustomTools.size > 0;
 
     const now = Date.now();
 
-    // 文档：读到 session.status_idle 才结束本轮；仍 running 时继续收后续 agent.message。
-    if (hasNewIdle && (repliedAt !== null || interrupted)) {
+    // 文档：读到非 requires_action 的 session.status_idle 才结束本轮；仍 running 时继续收后续 agent.message。
+    if (hasNewTerminalIdle && (repliedAt !== null || interrupted)) {
       return;
     }
 
@@ -128,6 +171,7 @@ export async function pollSessionEventsForAgentReply(params: PollSessionEventsPa
     } else if (
       repliedAt !== null &&
       pendingToolCalls === 0 &&
+      !blockedByCustomTool &&
       sessionLifecycle !== 'running' &&
       now - repliedAt >= settleAfterReply
     ) {
@@ -142,7 +186,9 @@ export async function pollSessionEventsForAgentReply(params: PollSessionEventsPa
     await sleep(interval, params.signal);
   }
 
-  if (repliedAt !== null && pendingToolCalls === 0) return;
+  if (repliedAt !== null && pendingToolCalls === 0 && !awaitingAfterRequiresAction && pendingCustomTools.size === 0) {
+    return;
+  }
 
   throw new ArkApiError('Agent reply timeout: exceeded overall deadline', {
     code: 'AGENT_REPLY_TIMEOUT',

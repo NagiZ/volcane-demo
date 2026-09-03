@@ -44,12 +44,25 @@ export interface ArkSessionEvent {
   id?: string;
   type: string;
   content?: string | ArkMessageContentBlock[];
+  name?: string;
+  input?: unknown;
+  status?: string;
+  stop_reason?: {
+    type?: string;
+    event_ids?: string[];
+  };
 }
 
 /** POST /sessions/{id}/events 请求体：事件必须包在 events 数组内 */
 export type ArkOutboundEvent =
   | { type: 'user.message'; content: ArkMessageContentBlock[] }
-  | { type: 'user.interrupt' };
+  | { type: 'user.interrupt' }
+  | {
+      type: 'user.custom_tool_result';
+      custom_tool_use_id: string;
+      is_error: boolean;
+      content: Array<{ type: 'text'; text: string }>;
+    };
 
 export interface SendSessionEventsRequestBody {
   events: ArkOutboundEvent[];

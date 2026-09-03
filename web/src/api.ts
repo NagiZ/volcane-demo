@@ -22,7 +22,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
-/** 将未知 JSON 收敛为契约内的三种 SSE 事件；非法 payload 丢弃。 */
+/** 将未知 JSON 收敛为契约内的四种（含 tool）SSE 事件；非法 payload 丢弃。 */
 export function parseNormalizedEvent(raw: unknown): NormalizedSseEvent | null {
   if (!isRecord(raw) || typeof raw.type !== 'string') return null;
 
@@ -38,6 +38,20 @@ export function parseNormalizedEvent(raw: unknown): NormalizedSseEvent | null {
   }
   if (raw.type === 'done') {
     return { type: 'done' };
+  }
+  if (
+    raw.type === 'tool' &&
+    typeof raw.tool_name === 'string' &&
+    typeof raw.call_id === 'string' &&
+    (raw.status === 'running' || raw.status === 'done' || raw.status === 'error')
+  ) {
+    return {
+      type: 'tool',
+      tool_name: raw.tool_name,
+      call_id: raw.call_id,
+      status: raw.status,
+      ...(typeof raw.message === 'string' ? { message: raw.message } : {}),
+    };
   }
   return null;
 }

@@ -1,5 +1,6 @@
 import axios, { AxiosError, type AxiosResponse } from 'axios';
 import type { Readable } from 'node:stream';
+import type { CustomToolResultItem } from '../tools/types.js';
 import type {
   ArkFileInfo,
   ArkMessageContentBlock,
@@ -134,6 +135,59 @@ export function buildSendInterruptBody(): SendSessionEventsRequestBody {
   return {
     events: [{ type: 'user.interrupt' }],
   };
+}
+
+/** 构造自定义工具结果事件请求体：官方 `user.custom_tool_result`。 */
+export function buildCustomToolResultEvents(
+  results: CustomToolResultItem[],
+): SendSessionEventsRequestBody {
+  return {
+    events: results.map((r) => ({
+      type: 'user.custom_tool_result' as const,
+      custom_tool_use_id: r.custom_tool_use_id,
+      is_error: r.is_error,
+      content: r.content,
+    })),
+  };
+}
+
+export interface SendCustomToolResultsParams {
+  arkApiKey: string;
+  arkBaseUrl: string;
+  sessionId: string;
+  results: CustomToolResultItem[];
+  signal?: AbortSignal;
+  /** 额外尝试次数，默认 2（总尝试 = 1 + retries） */
+  retries?: number;
+}
+
+/**
+ * 向 Session 回传自定义工具结果（投递确认 JSON，非 SSE）。
+ * 失败默认最多再重试 2 次（共 3 次尝试）；signal 已 abort 则立即停止。
+ */
+export async function sendCustomToolResults(params: SendCustomToolResultsParams): Promise<void> {
+  if (params.results.length === 0) return;
+  const body = buildCustomToolResultEvents(params.results);
+  const retries = params.retries ?? 2;
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      await axios.post(
+        `${params.arkBaseUrl}/sessions/${encodeURIComponent(params.sessionId)}/events`,
+        body,
+        {
+          headers: authHeaders(params.arkApiKey),
+          timeout: NO_TIMEOUT,
+          signal: params.signal,
+        },
+      );
+      return;
+    } catch (err) {
+      lastErr = err;
+      if (params.signal?.aborted) break;
+    }
+  }
+  throw toArkError(lastErr);
 }
 
 /** 创建 Ark Managed Agent Session（environment_with_overrides 全量 env） */

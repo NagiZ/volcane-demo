@@ -4,7 +4,8 @@ import { Composer, type SendPayload } from './components/Composer';
 import { MessageList } from './components/MessageList';
 import { OutputFilesBar } from './components/OutputFilesBar';
 import { TokenBar } from './components/TokenBar';
-import type { BackendStatus, ChatMessage } from './types';
+import { ToolStatusBar } from './components/ToolStatusBar';
+import type { BackendStatus, ChatMessage, ToolCallStatus } from './types';
 
 const TOKEN_STORAGE_KEY = 'volcane.webUserToken';
 const DEFAULT_TOKEN = 'demo-user';
@@ -38,6 +39,7 @@ export function App() {
   const [backendStatus, setBackendStatus] = useState<BackendStatus>('checking');
   const [notice, setNotice] = useState<string | null>(null);
   const [outputRefreshKey, setOutputRefreshKey] = useState(0);
+  const [toolCalls, setToolCalls] = useState<ToolCallStatus[]>([]);
 
   const abortRef = useRef<AbortController | null>(null);
   const interruptedRef = useRef(false);
@@ -169,6 +171,7 @@ export function App() {
 
     setMessages((prev) => [...prev, user]);
     setNotice(null);
+    setToolCalls([]);
     setStreaming(true);
     setWaitingDelta(true);
 
@@ -187,6 +190,22 @@ export function App() {
         file_names: Object.keys(payload.file_names).length > 0 ? payload.file_names : undefined,
         signal: controller.signal,
         onEvent: (event) => {
+          if (event.type === 'tool') {
+            setToolCalls((prev) => {
+              const rest = prev.filter((x) => x.call_id !== event.call_id);
+              return [
+                ...rest,
+                {
+                  call_id: event.call_id,
+                  tool_name: event.tool_name,
+                  status: event.status,
+                  ...(event.message ? { message: event.message } : {}),
+                },
+              ];
+            });
+            return;
+          }
+
           if (event.type === 'delta') {
             gotDelta = true;
             setWaitingDelta(false);
@@ -258,6 +277,7 @@ export function App() {
         },
       ]);
     } finally {
+      setToolCalls([]);
       if (abortRef.current === controller) {
         abortRef.current = null;
         setStreaming(false);
@@ -302,6 +322,7 @@ export function App() {
         <MessageList messages={messages} waiting={waitingDelta} />
       </main>
       <footer className="dock">
+        <ToolStatusBar items={toolCalls} />
         <OutputFilesBar token={token} disabled={busy} refreshToken={outputRefreshKey} />
         <Composer
           webUserToken={token}

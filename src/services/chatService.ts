@@ -7,11 +7,13 @@ import {
   listRecentSessionEvents,
   listSessionEvents,
   mountFileToSession,
+  sendCustomToolResults,
   sendSessionEvent,
   sendSessionInterrupt,
   tryStreamSessionEvents,
 } from '../clients/arkClient.js';
 import type { AppConfig } from '../config.js';
+import { executeCustomTools } from '../tools/executeCustomTools.js';
 import {
   allocateMountBasenames,
   arkMountPath,
@@ -92,10 +94,11 @@ export class ChatService {
     sessionId: string,
     userMessage: string,
     res: Response,
-    options?: { mountedPaths?: string[]; inlineFileIds?: string[] },
+    options?: { mountedPaths?: string[]; inlineFileIds?: string[]; userId: string },
   ): Promise<void> {
     const abortController = new AbortController();
     const signal = abortController.signal;
+    const userId = options?.userId ?? '';
     let settled = false;
 
     // 注意：必须用 req.close，且检查 writableEnded。
@@ -143,6 +146,34 @@ export class ChatService {
           listEvents: () => listSessionEvents(this.arkListParams(sessionId, signal)),
           baselineEventIds,
           onDelta: (text) => writeSseEvent(res, { type: 'delta', text }),
+          onTool: (ev) => writeSseEvent(res, { type: 'tool', ...ev }),
+          onRequiresAction: async (eventIds, pending) => {
+            const snapshot = eventIds.map((id) => ({
+              id,
+              name: pending.get(id)?.name ?? 'unknown',
+            }));
+            const results = await executeCustomTools({ eventIds, pending, userId });
+            for (let i = 0; i < results.length; i++) {
+              const r = results[i]!;
+              const meta = snapshot[i]!;
+              writeSseEvent(res, {
+                type: 'tool',
+                tool_name: meta.name,
+                call_id: r.custom_tool_use_id,
+                status: r.is_error ? 'error' : 'done',
+                ...(r.is_error
+                  ? { message: r.content[0]?.text ?? 'tool error' }
+                  : {}),
+              });
+            }
+            await sendCustomToolResults({
+              arkApiKey: this.config.arkApiKey,
+              arkBaseUrl: this.config.arkBaseUrl,
+              sessionId,
+              results,
+              signal,
+            });
+          },
           signal,
         });
       } finally {
@@ -198,6 +229,7 @@ export class ChatService {
         await this.streamOnce(session.sessionId, input.userMessage, res, {
           mountedPaths,
           inlineFileIds: input.inlineFileIds,
+          userId: session.tokenHash,
         });
         writeSseEvent(res, { type: 'done' });
         endSse(res);

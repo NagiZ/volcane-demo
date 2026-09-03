@@ -1,3 +1,5 @@
+import type { CustomToolUse } from '../tools/types.js';
+
 /**
  * 从方舟 Session 事件 content 字段提取文本。
  */
@@ -102,4 +104,37 @@ export function isToolResultEvent(raw: unknown): boolean {
   if (!raw || typeof raw !== 'object') return false;
   const type = (raw as Record<string, unknown>).type;
   return type === 'agent.tool_result' || type === 'agent.mcp_tool_result';
+}
+
+export function isCustomToolUseEvent(raw: unknown): boolean {
+  return Boolean(
+    raw && typeof raw === 'object' && (raw as Record<string, unknown>).type === 'agent.custom_tool_use',
+  );
+}
+
+export function parseCustomToolUse(raw: unknown): CustomToolUse | null {
+  if (!isCustomToolUseEvent(raw)) return null;
+  const o = raw as Record<string, unknown>;
+  const id = typeof o.id === 'string' ? o.id : '';
+  const name = typeof o.name === 'string' ? o.name : '';
+  if (!id || !name) return null;
+  const input =
+    o.input && typeof o.input === 'object' && !Array.isArray(o.input)
+      ? (o.input as Record<string, unknown>)
+      : {};
+  return { id, name, input };
+}
+
+export function parseRequiresActionIdle(raw: unknown): { eventIds: string[] } | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const o = raw as Record<string, unknown>;
+  if (o.type !== 'session.status_idle') return null;
+  const sr = o.stop_reason;
+  if (!sr || typeof sr !== 'object') return null;
+  const stop = sr as Record<string, unknown>;
+  if (stop.type !== 'requires_action') return null;
+  const ids = stop.event_ids;
+  if (!Array.isArray(ids)) return null;
+  const eventIds = ids.filter((x): x is string => typeof x === 'string' && x.length > 0);
+  return { eventIds };
 }

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ArkSessionEvent } from '../types/ark.js';
+import type { CustomToolUse } from '../tools/types.js';
 import { pollSessionEventsForAgentReply } from './pollSessionEvents.js';
 
 describe('pollSessionEventsForAgentReply', () => {
@@ -407,5 +408,112 @@ describe('pollSessionEventsForAgentReply', () => {
         timeoutMs: 5_000,
       }),
     ).rejects.toMatchObject({ code: 'AGENT_REPLY_TIMEOUT' });
+  });
+
+  it('requires_action 触发回调且不提前结束，真正 idle 才收口', async () => {
+    const pendingSeen: string[][] = [];
+    const tools: Array<{ status: string; call_id: string }> = [];
+    const deltas: string[] = [];
+    const rounds: ArkSessionEvent[][] = [
+      [
+        { id: 'run1', type: 'session.status_running' },
+        {
+          id: 'ctu1',
+          type: 'agent.custom_tool_use',
+          name: 'get_user_order',
+          input: { order_id: '1' },
+        },
+      ],
+      [
+        { id: 'run1', type: 'session.status_running' },
+        {
+          id: 'ctu1',
+          type: 'agent.custom_tool_use',
+          name: 'get_user_order',
+          input: { order_id: '1' },
+        },
+        {
+          id: 'idle-ra',
+          type: 'session.status_idle',
+          stop_reason: { type: 'requires_action', event_ids: ['ctu1'] },
+        },
+      ],
+      [
+        { id: 'run2', type: 'session.status_running' },
+        { id: 'm1', type: 'agent.message', content: [{ type: 'text', text: '订单已付' }] },
+        { id: 'idle-done', type: 'session.status_idle' },
+      ],
+    ];
+    let i = 0;
+    await pollSessionEventsForAgentReply({
+      listEvents: async () => rounds[Math.min(i++, rounds.length - 1)]!,
+      pollIntervalMs: 1,
+      timeoutMs: 5_000,
+      onDelta: (text) => deltas.push(text),
+      onTool: (ev) => tools.push({ status: ev.status, call_id: ev.call_id }),
+      onRequiresAction: async (eventIds, pending: Map<string, CustomToolUse>) => {
+        pendingSeen.push([...eventIds]);
+        for (const id of eventIds) pending.delete(id);
+      },
+    });
+    expect(pendingSeen).toEqual([['ctu1']]);
+    expect(tools.some((t) => t.call_id === 'ctu1' && t.status === 'running')).toBe(true);
+    expect(deltas).toEqual(['订单已付']);
+  });
+
+  it('requires_action 后 settle 不得提前收口：须等到最终 idle', async () => {
+    // 回归：先有 agent.message → custom_tool_use → requires_action idle；
+    // 此后若干轮无新事件且 settleAfterReplyMs=0。若未阻塞 settle，
+    // 会因 repliedAt + idle lifecycle + pendingToolCalls=0 提前结束，丢掉终态回复。
+    const afterRequires: ArkSessionEvent[] = [
+      { id: 'run1', type: 'session.status_running' },
+      {
+        id: 'm0',
+        type: 'agent.message',
+        content: [{ type: 'text', text: '我先查订单' }],
+      },
+      {
+        id: 'ctu1',
+        type: 'agent.custom_tool_use',
+        name: 'get_user_order',
+        input: { order_id: '1' },
+      },
+      {
+        id: 'idle-ra',
+        type: 'session.status_idle',
+        stop_reason: { type: 'requires_action', event_ids: ['ctu1'] },
+      },
+    ];
+    const final: ArkSessionEvent[] = [
+      ...afterRequires,
+      { id: 'run2', type: 'session.status_running' },
+      {
+        id: 'm1',
+        type: 'agent.message',
+        content: [{ type: 'text', text: '订单已付' }],
+      },
+      { id: 'idle-done', type: 'session.status_idle' },
+    ];
+
+    let call = 0;
+    const deltas: string[] = [];
+    let onRequiresActionCalls = 0;
+
+    await pollSessionEventsForAgentReply({
+      listEvents: async () => (++call <= 4 ? afterRequires : final),
+      pollIntervalMs: 1,
+      settleAfterReplyMs: 0,
+      idleTimeoutMs: 60_000,
+      timeoutMs: 5_000,
+      onDelta: (text) => deltas.push(text),
+      onRequiresAction: async (eventIds, pending: Map<string, CustomToolUse>) => {
+        onRequiresActionCalls++;
+        for (const id of eventIds) pending.delete(id);
+      },
+    });
+
+    expect(onRequiresActionCalls).toBe(1);
+    expect(call).toBeGreaterThan(4);
+    expect(deltas).toEqual(['我先查订单', '订单已付']);
   });
 });

@@ -3,7 +3,10 @@ import {
   extractTextDeltaFromArkEvent,
   extractTextFromEventContent,
   isAgentMessageEvent,
+  isCustomToolUseEvent,
   isSessionIdleEvent,
+  parseCustomToolUse,
+  parseRequiresActionIdle,
   sessionEventKey,
 } from './arkEventParser.js';
 
@@ -75,5 +78,41 @@ describe('session event helpers', () => {
 
   it('uses id as dedupe key when present', () => {
     expect(sessionEventKey({ id: 'sevt-1', type: 'agent.message' })).toBe('sevt-1');
+  });
+});
+
+describe('custom tool parsers', () => {
+  it('parses agent.custom_tool_use', () => {
+    const raw = {
+      id: 'evt-1',
+      type: 'agent.custom_tool_use',
+      name: 'get_user_order',
+      input: { order_id: 'ORD-1' },
+    };
+    expect(isCustomToolUseEvent(raw)).toBe(true);
+    expect(parseCustomToolUse(raw)).toEqual({
+      id: 'evt-1',
+      name: 'get_user_order',
+      input: { order_id: 'ORD-1' },
+    });
+  });
+
+  it('parses requires_action idle', () => {
+    expect(
+      parseRequiresActionIdle({
+        type: 'session.status_idle',
+        stop_reason: { type: 'requires_action', event_ids: ['evt-1', 'evt-2'] },
+      }),
+    ).toEqual({ eventIds: ['evt-1', 'evt-2'] });
+  });
+
+  it('returns null for normal idle', () => {
+    expect(parseRequiresActionIdle({ type: 'session.status_idle' })).toBeNull();
+    expect(
+      parseRequiresActionIdle({
+        type: 'session.status_idle',
+        stop_reason: { type: 'end_turn', event_ids: [] },
+      }),
+    ).toBeNull();
   });
 });

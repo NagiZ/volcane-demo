@@ -5,9 +5,11 @@ import { ChatService } from './services/chatService.js';
 import { FileService } from './services/fileService.js';
 import { SessionService } from './services/sessionService.js';
 import { SessionStore } from './store/sessionStore.js';
+import { registerBuiltinTools } from './tools/builtinTools.js';
 
 async function main() {
   const config = loadConfig();
+  registerBuiltinTools();
   const redis = new Redis(config.redisUrl);
   const sessionStore = new SessionStore(redis);
   const sessionService = new SessionService(config, sessionStore);

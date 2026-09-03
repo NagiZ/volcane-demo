@@ -1,11 +1,15 @@
-import { describe, expect, it, vi } from 'vitest';
+import axios from 'axios';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  ArkApiError,
   buildCreateSessionBody,
+  buildCustomToolResultEvents,
   buildMountFileBody,
   buildSendInterruptBody,
   buildSendSessionEventsBody,
   buildSessionEventsStreamUrl,
   collectPagedSessionEvents,
+  sendCustomToolResults,
 } from './arkClient.js';
 
 describe('buildCreateSessionBody', () => {
@@ -140,5 +144,103 @@ describe('buildSessionEventsStreamUrl', () => {
     expect(buildSessionEventsStreamUrl('https://ark.example/api/v3', 'sesn-1')).toBe(
       'https://ark.example/api/v3/sessions/sesn-1/events/stream',
     );
+  });
+});
+
+describe('buildCustomToolResultEvents', () => {
+  it('matches official user.custom_tool_result shape', () => {
+    expect(
+      buildCustomToolResultEvents([
+        {
+          custom_tool_use_id: 'evt-1',
+          is_error: false,
+          content: [{ type: 'text', text: '{"ok":true}' }],
+        },
+      ]),
+    ).toEqual({
+      events: [
+        {
+          type: 'user.custom_tool_result',
+          custom_tool_use_id: 'evt-1',
+          is_error: false,
+          content: [{ type: 'text', text: '{"ok":true}' }],
+        },
+      ],
+    });
+  });
+});
+
+describe('sendCustomToolResults', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('no-ops when results is empty', async () => {
+    const post = vi.spyOn(axios, 'post');
+    await sendCustomToolResults({
+      arkApiKey: 'k',
+      arkBaseUrl: 'https://ark.example/api/v3',
+      sessionId: 'sesn-1',
+      results: [],
+    });
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it('posts custom_tool_result events to /sessions/{id}/events', async () => {
+    const post = vi.spyOn(axios, 'post').mockResolvedValueOnce({ data: {} });
+    await sendCustomToolResults({
+      arkApiKey: 'k',
+      arkBaseUrl: 'https://ark.example/api/v3',
+      sessionId: 'sesn-1',
+      results: [
+        {
+          custom_tool_use_id: 'evt-1',
+          is_error: false,
+          content: [{ type: 'text', text: '{"ok":true}' }],
+        },
+      ],
+    });
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(post).toHaveBeenCalledWith(
+      'https://ark.example/api/v3/sessions/sesn-1/events',
+      {
+        events: [
+          {
+            type: 'user.custom_tool_result',
+            custom_tool_use_id: 'evt-1',
+            is_error: false,
+            content: [{ type: 'text', text: '{"ok":true}' }],
+          },
+        ],
+      },
+      expect.objectContaining({
+        headers: {
+          Authorization: 'Bearer k',
+          'Content-Type': 'application/json',
+        },
+        timeout: 0,
+      }),
+    );
+  });
+
+  it('retries failed posts up to 3 attempts by default then throws ArkApiError', async () => {
+    const post = vi
+      .spyOn(axios, 'post')
+      .mockRejectedValue(new Error('network down'));
+    await expect(
+      sendCustomToolResults({
+        arkApiKey: 'k',
+        arkBaseUrl: 'https://ark.example/api/v3',
+        sessionId: 'sesn-1',
+        results: [
+          {
+            custom_tool_use_id: 'evt-1',
+            is_error: true,
+            content: [{ type: 'text', text: 'err' }],
+          },
+        ],
+      }),
+    ).rejects.toBeInstanceOf(ArkApiError);
+    expect(post).toHaveBeenCalledTimes(3);
   });
 });

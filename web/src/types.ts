@@ -1,8 +1,22 @@
-/** 与后端 `src/types/sse.ts` 对齐的 SSE 联合类型，不会有第四种。 */
+/** 与后端 `src/types/sse.ts` 对齐的 SSE 联合类型，四种（含 tool）。 */
 export type NormalizedSseEvent =
   | { type: 'delta'; text: string }
   | { type: 'error'; code: string; message: string }
-  | { type: 'done' };
+  | { type: 'done' }
+  | {
+      type: 'tool';
+      tool_name: string;
+      call_id: string;
+      status: 'running' | 'done' | 'error';
+      message?: string;
+    };
+
+export interface ToolCallStatus {
+  call_id: string;
+  tool_name: string;
+  status: 'running' | 'done' | 'error';
+  message?: string;
+}
 
 export type ChatRole = 'user' | 'agent' | 'error';
 
