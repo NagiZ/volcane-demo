@@ -15,6 +15,24 @@ function requireNonEmptyString(value: unknown, field: string): string | null {
   return null;
 }
 
+function parseStringArray(value: unknown): string[] | null {
+  if (value == null) return [];
+  if (!Array.isArray(value)) return null;
+  if (!value.every((x) => typeof x === 'string' && x.trim())) return null;
+  return value.map((x) => (x as string).trim());
+}
+
+function parseFileNames(value: unknown): Record<string, string> | null {
+  if (value == null) return {};
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof v !== 'string' || !v.trim()) return null;
+    out[k] = v.trim();
+  }
+  return out;
+}
+
 export function createAgentRouter(deps: {
   chatService: ChatService;
   sessionService: SessionService;
@@ -29,10 +47,30 @@ export function createAgentRouter(deps: {
       return res.status(400).json({ error: tokenErr ?? msgErr });
     }
 
+    const fileIds = parseStringArray(req.body?.file_ids);
+    if (fileIds === null) {
+      return res.status(400).json({ error: 'file_ids must be an array of non-empty strings' });
+    }
+    const inlineFileIds = parseStringArray(req.body?.inline_file_ids);
+    if (inlineFileIds === null) {
+      return res.status(400).json({ error: 'inline_file_ids must be an array of non-empty strings' });
+    }
+    const fileNames = parseFileNames(req.body?.file_names);
+    if (fileNames === null) {
+      return res.status(400).json({ error: 'file_names must be an object of non-empty string values' });
+    }
+    const fileIdSet = new Set(fileIds);
+    if (!inlineFileIds.every((id) => fileIdSet.has(id))) {
+      return res.status(400).json({ error: 'inline_file_ids must be a subset of file_ids' });
+    }
+
     try {
       await deps.chatService.streamChat(res, {
         webUserToken: req.body.webUserToken.trim(),
         userMessage: req.body.userMessage.trim(),
+        fileIds: fileIds.length > 0 ? fileIds : undefined,
+        inlineFileIds: inlineFileIds.length > 0 ? inlineFileIds : undefined,
+        fileNames: Object.keys(fileNames).length > 0 ? fileNames : undefined,
       });
     } catch (err) {
       if (!res.headersSent) {

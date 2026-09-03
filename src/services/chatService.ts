@@ -3,13 +3,20 @@ import type { Readable } from 'node:stream';
 import type { Response } from 'express';
 import {
   ArkApiError,
+  getArkFile,
   listRecentSessionEvents,
   listSessionEvents,
+  mountFileToSession,
   sendSessionEvent,
   sendSessionInterrupt,
   tryStreamSessionEvents,
 } from '../clients/arkClient.js';
 import type { AppConfig } from '../config.js';
+import {
+  allocateMountBasenames,
+  arkMountPath,
+  sandboxUploadPath,
+} from '../utils/mountPath.js';
 import { sessionEventKey } from '../utils/arkEventParser.js';
 import { pollSessionEventsForAgentReply } from '../utils/pollSessionEvents.js';
 import { SESSION_HISTORY_LIMIT, toChronologicalChatMessages, type ChatHistoryMessage } from '../utils/sessionHistory.js';
@@ -37,7 +44,56 @@ export class ChatService {
     };
   }
 
-  private async streamOnce(sessionId: string, userMessage: string, res: Response): Promise<void> {
+  private async resolveFileName(
+    fileId: string,
+    fileNames: Record<string, string> | undefined,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    const fromClient = fileNames?.[fileId]?.trim();
+    if (fromClient) return fromClient;
+    const info = await getArkFile({
+      arkApiKey: this.config.arkApiKey,
+      arkBaseUrl: this.config.arkBaseUrl,
+      fileId,
+      signal,
+    });
+    return info.name || fileId;
+  }
+
+  private async mountFilesToSession(
+    sessionId: string,
+    fileIds: string[],
+    fileNames: Record<string, string> | undefined,
+    signal?: AbortSignal,
+  ): Promise<string[]> {
+    const named = [];
+    for (const fileId of fileIds) {
+      const name = await this.resolveFileName(fileId, fileNames, signal);
+      named.push({ fileId, name });
+    }
+    const basenames = allocateMountBasenames(named);
+    const sandboxPaths: string[] = [];
+    for (const { fileId } of named) {
+      const basename = basenames.get(fileId)!;
+      await mountFileToSession({
+        arkApiKey: this.config.arkApiKey,
+        arkBaseUrl: this.config.arkBaseUrl,
+        sessionId,
+        fileId,
+        mountPath: arkMountPath(basename),
+        signal,
+      });
+      sandboxPaths.push(sandboxUploadPath(basename));
+    }
+    return sandboxPaths;
+  }
+
+  private async streamOnce(
+    sessionId: string,
+    userMessage: string,
+    res: Response,
+    options?: { mountedPaths?: string[]; inlineFileIds?: string[] },
+  ): Promise<void> {
     const abortController = new AbortController();
     const signal = abortController.signal;
     let settled = false;
@@ -74,6 +130,8 @@ export class ChatService {
         await sendSessionEvent({
           ...this.arkListParams(sessionId, signal),
           userMessage,
+          mountedPaths: options?.mountedPaths,
+          inlineFileIds: options?.inlineFileIds,
         });
 
         if (piped) {
@@ -115,7 +173,13 @@ export class ChatService {
 
   async streamChat(
     res: Response,
-    input: { webUserToken: string; userMessage: string },
+    input: {
+      webUserToken: string;
+      userMessage: string;
+      fileIds?: string[];
+      inlineFileIds?: string[];
+      fileNames?: Record<string, string>;
+    },
   ): Promise<void> {
     let session = await this.sessionService.getOrCreateSession(input.webUserToken);
 
@@ -123,7 +187,18 @@ export class ChatService {
 
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        await this.streamOnce(session.sessionId, input.userMessage, res);
+        let mountedPaths: string[] | undefined;
+        if (input.fileIds?.length) {
+          mountedPaths = await this.mountFilesToSession(
+            session.sessionId,
+            input.fileIds,
+            input.fileNames,
+          );
+        }
+        await this.streamOnce(session.sessionId, input.userMessage, res, {
+          mountedPaths,
+          inlineFileIds: input.inlineFileIds,
+        });
         writeSseEvent(res, { type: 'done' });
         endSse(res);
         return;
