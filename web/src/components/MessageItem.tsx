@@ -17,11 +17,22 @@ export function MessageItem({ message }: MessageItemProps) {
 
   const side = message.role === 'user' ? 'user' : 'agent';
   const label = message.role === 'user' ? '你' : 'Agent';
+  const attachments = message.attachments ?? [];
 
   return (
     <article className={`bubble bubble--${side}`}>
       <p className="bubble__meta">{label}</p>
-      <p className="bubble__text">{message.content}</p>
+      {message.content.length > 0 && <p className="bubble__text">{message.content}</p>}
+      {attachments.length > 0 && (
+        <ul className="bubble__attachments">
+          {attachments.map((item) => (
+            <li key={item.file_id} className="bubble__attachment">
+              {item.name}
+              {item.inline ? ' · 直读' : ''}
+            </li>
+          ))}
+        </ul>
+      )}
     </article>
   );
 }

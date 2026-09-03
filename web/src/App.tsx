@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ApiError, fetchHealth, fetchSessionMessages, interruptSession, rebuildSession, streamChat } from './api';
-import { Composer } from './components/Composer';
+import { Composer, type SendPayload } from './components/Composer';
 import { MessageList } from './components/MessageList';
+import { OutputFilesBar } from './components/OutputFilesBar';
 import { TokenBar } from './components/TokenBar';
 import type { BackendStatus, ChatMessage } from './types';
 
@@ -36,6 +37,7 @@ export function App() {
   const [interrupting, setInterrupting] = useState(false);
   const [backendStatus, setBackendStatus] = useState<BackendStatus>('checking');
   const [notice, setNotice] = useState<string | null>(null);
+  const [outputRefreshKey, setOutputRefreshKey] = useState(0);
 
   const abortRef = useRef<AbortController | null>(null);
   const interruptedRef = useRef(false);
@@ -142,7 +144,7 @@ export function App() {
     }
   }
 
-  async function handleSend(userMessage: string) {
+  async function handleSend(userMessage: string, payload: SendPayload) {
     if (busy) return;
     const trimmedToken = token.trim();
     if (trimmedToken.length === 0) {
@@ -150,7 +152,16 @@ export function App() {
       return;
     }
 
-    const user: ChatMessage = { id: nextId(), role: 'user', content: userMessage };
+    const hasText = userMessage.length > 0;
+    const hasFiles = payload.file_ids.length > 0;
+    if (!hasText && !hasFiles) return;
+
+    const user: ChatMessage = {
+      id: nextId(),
+      role: 'user',
+      content: userMessage,
+      attachments: payload.attachments.length > 0 ? payload.attachments : undefined,
+    };
     const agentId = nextId();
     let gotDelta = false;
     let gotError = false;
@@ -168,6 +179,9 @@ export function App() {
       await streamChat({
         webUserToken: trimmedToken,
         userMessage,
+        file_ids: payload.file_ids.length > 0 ? payload.file_ids : undefined,
+        inline_file_ids: payload.inline_file_ids.length > 0 ? payload.inline_file_ids : undefined,
+        file_names: Object.keys(payload.file_names).length > 0 ? payload.file_names : undefined,
         signal: controller.signal,
         onEvent: (event) => {
           if (event.type === 'delta') {
@@ -187,6 +201,7 @@ export function App() {
 
           if (event.type === 'done') {
             setWaitingDelta(false);
+            setOutputRefreshKey((key) => key + 1);
             return;
           }
 
@@ -283,15 +298,19 @@ export function App() {
       <main className="stage">
         <MessageList messages={messages} waiting={waitingDelta} />
       </main>
-      <Composer
-        disabled={busy}
-        streaming={streaming}
-        interrupting={interrupting}
-        onSend={(text) => void handleSend(text)}
-        onAbort={() => {
-          void handleAbort();
-        }}
-      />
+      <footer className="dock">
+        <OutputFilesBar token={token} disabled={busy} refreshToken={outputRefreshKey} />
+        <Composer
+          webUserToken={token}
+          disabled={busy}
+          streaming={streaming}
+          interrupting={interrupting}
+          onSend={(text, payload) => void handleSend(text, payload)}
+          onAbort={() => {
+            void handleAbort();
+          }}
+        />
+      </footer>
     </div>
   );
 }
