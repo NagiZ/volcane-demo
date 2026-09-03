@@ -175,10 +175,13 @@ export function App() {
     const controller = new AbortController();
     abortRef.current = controller;
 
+    const apiUserMessage =
+      userMessage.length > 0 ? userMessage : payload.file_ids.length > 0 ? '请处理附件' : userMessage;
+
     try {
       await streamChat({
         webUserToken: trimmedToken,
-        userMessage,
+        userMessage: apiUserMessage,
         file_ids: payload.file_ids.length > 0 ? payload.file_ids : undefined,
         inline_file_ids: payload.inline_file_ids.length > 0 ? payload.inline_file_ids : undefined,
         file_names: Object.keys(payload.file_names).length > 0 ? payload.file_names : undefined,
