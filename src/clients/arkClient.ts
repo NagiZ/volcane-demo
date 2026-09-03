@@ -238,8 +238,14 @@ export async function sendSessionInterrupt(
   }
 }
 
+/** 官方「流式获取会话事件」路径：GET /sessions/{id}/events/stream */
+export function buildSessionEventsStreamUrl(arkBaseUrl: string, sessionId: string): string {
+  return `${arkBaseUrl}/sessions/${encodeURIComponent(sessionId)}/events/stream`;
+}
+
 /**
- * 尝试流式获取会话事件（官方「流式获取会话事件」）。
+ * 尝试流式获取会话事件（官方 GET /events/stream）。
+ * 须在发送 user.message 之前建立连接，以免丢掉本轮事件。
  * 若上游返回非 SSE，返回 null，由调用方回退到轮询。
  */
 export async function tryStreamSessionEvents(
@@ -247,7 +253,7 @@ export async function tryStreamSessionEvents(
 ): Promise<NodeJS.ReadableStream | null> {
   try {
     const res: AxiosResponse<NodeJS.ReadableStream> = await axios.get(
-      `${params.arkBaseUrl}/sessions/${encodeURIComponent(params.sessionId)}/events`,
+      buildSessionEventsStreamUrl(params.arkBaseUrl, params.sessionId),
       {
         headers: {
           ...authHeaders(params.arkApiKey),

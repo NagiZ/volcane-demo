@@ -81,3 +81,25 @@ export function sessionEventKey(event: { id?: string; type?: string; content?: u
   if (event.id) return event.id;
   return `${event.type ?? 'unknown'}:${JSON.stringify(event.content ?? null)}`;
 }
+
+/** 从事件列表末尾倒找最新的会话级 running/idle */
+export function latestSessionLifecycle(events: { type?: string }[]): 'running' | 'idle' | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const type = events[i]?.type;
+    if (type === 'session.status_idle') return 'idle';
+    if (type === 'session.status_running') return 'running';
+  }
+  return null;
+}
+
+export function isToolUseEvent(raw: unknown): boolean {
+  if (!raw || typeof raw !== 'object') return false;
+  const type = (raw as Record<string, unknown>).type;
+  return type === 'agent.tool_use' || type === 'agent.mcp_tool_use';
+}
+
+export function isToolResultEvent(raw: unknown): boolean {
+  if (!raw || typeof raw !== 'object') return false;
+  const type = (raw as Record<string, unknown>).type;
+  return type === 'agent.tool_result' || type === 'agent.mcp_tool_result';
+}

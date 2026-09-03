@@ -336,6 +336,59 @@ describe('pollSessionEventsForAgentReply', () => {
     expect(deltas).toEqual(['完整答案']);
   });
 
+  it('session 仍 running 时不得因第一条 agent.message 收口，须继续接收后续 message', async () => {
+    // 文档：一轮内每个模型请求都会产生一条 buffered agent.message，
+    // 必须等到 session.status_idle 才结束。第一条说明性 message 之后
+    // 若按 settle 收口，后续回复会被丢掉。
+    const first: ArkSessionEvent[] = [
+      { id: 'run1', type: 'session.status_running' },
+      { id: 'u1', type: 'user.message', content: [{ type: 'text', text: '查一下' }] },
+      { id: 'm1', type: 'agent.message', content: [{ type: 'text', text: '我先查一下' }] },
+    ];
+    const rest: ArkSessionEvent[] = [
+      ...first,
+      { id: 'm2', type: 'agent.message', content: [{ type: 'text', text: '查询结果是 42' }] },
+      { id: 'idle1', type: 'session.status_idle' },
+    ];
+    let call = 0;
+    const deltas: string[] = [];
+
+    await pollSessionEventsForAgentReply({
+      listEvents: async () => (++call < 5 ? first : rest),
+      onDelta: (text) => deltas.push(text),
+      pollIntervalMs: 1,
+      settleAfterReplyMs: 0,
+      idleTimeoutMs: 60_000,
+      timeoutMs: 5_000,
+    });
+
+    expect(deltas).toEqual(['我先查一下', '查询结果是 42']);
+  });
+
+  it('同一 agent.message id 内容从短变长时下发增量文本', async () => {
+    const listEvents = vi
+      .fn()
+      .mockResolvedValueOnce([
+        { id: 'run1', type: 'session.status_running' },
+        { id: 'm1', type: 'agent.message', content: [{ type: 'text', text: '你好' }] },
+      ])
+      .mockResolvedValueOnce([
+        { id: 'run1', type: 'session.status_running' },
+        { id: 'm1', type: 'agent.message', content: [{ type: 'text', text: '你好，这是完整答案' }] },
+        { id: 'idle1', type: 'session.status_idle' },
+      ]);
+
+    const deltas: string[] = [];
+    await pollSessionEventsForAgentReply({
+      listEvents,
+      onDelta: (text) => deltas.push(text),
+      pollIntervalMs: 1,
+      timeoutMs: 5_000,
+    });
+
+    expect(deltas.join('')).toBe('你好，这是完整答案');
+  });
+
   it('仅有 user.message 与晚到的 idle 时不提前收口，避免空 delta 结束', async () => {
     const user: ArkSessionEvent = {
       id: 'u1',

@@ -4,7 +4,10 @@ import {
   extractTextDeltaFromArkEvent,
   isAgentMessageEvent,
   isSessionIdleEvent,
+  isToolResultEvent,
+  isToolUseEvent,
   isUserInterruptEvent,
+  latestSessionLifecycle,
   sessionEventKey,
 } from './arkEventParser.js';
 
@@ -53,13 +56,13 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
  * POST 投递后轮询「查询会话事件列表」，将新增 agent.message 转为 SSE delta。
  *
  * 终止条件（任一成立即正常返回）：
- * 1. 出现 session.status_idle，且本轮见过 agent.message（可跨轮）或同批 user.message，
- *    或见过 user.interrupt；
- * 2. 已收到 agent.message、其后无未完成的工具调用，且此后 settleAfterReplyMs
- *    内无新事件——方舟有时给出回复后迟迟不发 idle。
+ * 1. 出现 session.status_idle，且本轮见过 agent.message 或 user.interrupt；
+ * 2. 已收到 agent.message、其后无未完成的工具调用，会话已不在 running，
+ *    且此后 settleAfterReplyMs 内无新事件——方舟有时给出回复后迟迟不发 idle。
  *
- * ⚠️ agent.message 不等于「答完」：多步任务中 Agent 会先发一条说明再调工具，
- * 必须跟踪 tool_use / tool_result 配对。
+ * ⚠️ 一轮内每个模型请求都会产生一条 agent.message。第一条不等于答完，
+ * 会话仍为 session.status_running 时不得收口。
+ * 必须跟踪 tool_use / tool_result（含 mcp 变体）配对。
  */
 export async function pollSessionEventsForAgentReply(params: PollSessionEventsParams): Promise<void> {
   const seen = new Set(params.baselineEventIds ?? []);
@@ -69,12 +72,14 @@ export async function pollSessionEventsForAgentReply(params: PollSessionEventsPa
   const hardDeadline = Date.now() + (params.timeoutMs ?? Number.POSITIVE_INFINITY);
   /** 最近一次拉到新事件的时刻；无进展超时以此为基准。 */
   let lastProgressAt = Date.now();
-  /** 本轮是否已见过 agent.message（跨轮 idle 收口用）。 */
+  /** 本轮是否已见过可展示回复（跨轮 idle 收口用）。 */
   let repliedAt: number | null = null;
   /** 未收到 tool_result 的 tool_use 数；>0 表示 Agent 仍在执行工具，尚未答完。 */
   let pendingToolCalls = 0;
   /** 本轮是否见过 user.interrupt；见到后等 idle 即可收口。 */
   let interrupted = false;
+  /** 已向下游写出的 agent.message 全文，用于同 id 内容补全时只推增量。 */
+  const emittedTextById = new Map<string, string>();
 
   while (Date.now() < hardDeadline) {
     if (params.signal?.aborted) {
@@ -84,34 +89,48 @@ export async function pollSessionEventsForAgentReply(params: PollSessionEventsPa
     const events = (await params.listEvents()) ?? [];
     const newEvents = events.filter((event) => !seen.has(sessionEventKey(event)));
 
+    for (const event of events) {
+      if (!isAgentMessageEvent(event)) continue;
+      const key = sessionEventKey(event);
+      const text = extractTextDeltaFromArkEvent(event);
+      if (!text) continue;
+      const prev = emittedTextById.get(key);
+      if (prev === undefined && seen.has(key)) {
+        emittedTextById.set(key, text);
+        continue;
+      }
+      if (text === prev) continue;
+      const chunk = text.startsWith(prev ?? '') ? text.slice((prev ?? '').length) : text;
+      if (chunk) params.onDelta(chunk);
+      emittedTextById.set(key, text);
+      repliedAt = Date.now();
+    }
+
     for (const event of newEvents) {
       seen.add(sessionEventKey(event));
-      if (event.type === 'agent.tool_use') pendingToolCalls++;
-      else if (event.type === 'agent.tool_result') pendingToolCalls = Math.max(0, pendingToolCalls - 1);
-      if (isAgentMessageEvent(event)) {
-        const text = extractTextDeltaFromArkEvent(event);
-        if (text) params.onDelta(text);
-      }
+      if (isToolUseEvent(event)) pendingToolCalls++;
+      else if (isToolResultEvent(event)) pendingToolCalls = Math.max(0, pendingToolCalls - 1);
       if (isUserInterruptEvent(event)) interrupted = true;
     }
 
     const hasNewIdle = newEvents.some(isSessionIdleEvent);
-    const hasNewAgentMessage = newEvents.some(isAgentMessageEvent);
+    const sessionLifecycle = latestSessionLifecycle(events);
 
     const now = Date.now();
-    if (hasNewAgentMessage) repliedAt = now;
 
-    // 跨轮：agent.message 已在此前轮次见过时，晚到的 idle 也应收口。
-    // 注意：不能仅凭 user.message + idle 收口，否则尚未抽出回复就会 done → 前端 EMPTY_STREAM。
-    if (hasNewIdle && (hasNewAgentMessage || repliedAt !== null || interrupted)) {
+    // 文档：读到 session.status_idle 才结束本轮；仍 running 时继续收后续 agent.message。
+    if (hasNewIdle && (repliedAt !== null || interrupted)) {
       return;
     }
 
     if (newEvents.length > 0) {
-      // 任何新事件都算有进展（含 thinking / tool_use / tool_result），重置无进展计时。
       lastProgressAt = now;
-    } else if (repliedAt !== null && pendingToolCalls === 0 && now - repliedAt >= settleAfterReply) {
-      // 已答完、工具无待完成、只是缺 idle 事件：正常结束，不报错。
+    } else if (
+      repliedAt !== null &&
+      pendingToolCalls === 0 &&
+      sessionLifecycle !== 'running' &&
+      now - repliedAt >= settleAfterReply
+    ) {
       return;
     } else if (now - lastProgressAt >= idleTimeout) {
       throw new ArkApiError(
@@ -123,8 +142,6 @@ export async function pollSessionEventsForAgentReply(params: PollSessionEventsPa
     await sleep(interval, params.signal);
   }
 
-  // 触达总上限：若已给出回复且无待完成工具，按已答完收口，
-  // 不让用户在看到答案后再收到错误。
   if (repliedAt !== null && pendingToolCalls === 0) return;
 
   throw new ArkApiError('Agent reply timeout: exceeded overall deadline', {

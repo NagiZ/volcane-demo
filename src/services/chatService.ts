@@ -60,28 +60,34 @@ export class ChatService {
       const baselineEvents = await listSessionEvents(this.arkListParams(sessionId, signal));
       const baselineEventIds = new Set(baselineEvents.map((event) => sessionEventKey(event)));
 
-      await sendSessionEvent({
-        ...this.arkListParams(sessionId, signal),
-        userMessage,
-      });
-
+      // 文档要求先连 GET /events/stream 再投递 user.message，否则会丢掉本轮事件。
       const stream = await tryStreamSessionEvents(this.arkListParams(sessionId, signal));
-      if (stream) {
-        let gotContent = false;
-        await pipeArkStreamToSse(stream as unknown as IncomingMessage, (text) => {
-          gotContent = true;
-          writeSseEvent(res, { type: 'delta', text });
-        });
-        if (gotContent) return;
-        (stream as Readable).destroy?.();
-      }
+      try {
+        const piped = stream
+          ? pipeArkStreamToSse(stream as unknown as IncomingMessage, (text) => {
+              writeSseEvent(res, { type: 'delta', text });
+            })
+          : null;
 
-      await pollSessionEventsForAgentReply({
-        listEvents: () => listSessionEvents(this.arkListParams(sessionId, signal)),
-        baselineEventIds,
-        onDelta: (text) => writeSseEvent(res, { type: 'delta', text }),
-        signal,
-      });
+        await sendSessionEvent({
+          ...this.arkListParams(sessionId, signal),
+          userMessage,
+        });
+
+        if (piped) {
+          await piped;
+          return;
+        }
+
+        await pollSessionEventsForAgentReply({
+          listEvents: () => listSessionEvents(this.arkListParams(sessionId, signal)),
+          baselineEventIds,
+          onDelta: (text) => writeSseEvent(res, { type: 'delta', text }),
+          signal,
+        });
+      } finally {
+        (stream as Readable | null)?.destroy?.();
+      }
     } finally {
       settled = true;
       res.req.off('close', onClientGone);

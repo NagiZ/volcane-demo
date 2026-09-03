@@ -3,6 +3,7 @@ import {
   buildCreateSessionBody,
   buildSendInterruptBody,
   buildSendSessionEventsBody,
+  buildSessionEventsStreamUrl,
   collectPagedSessionEvents,
 } from './arkClient.js';
 
@@ -103,5 +104,13 @@ describe('collectPagedSessionEvents', () => {
 
     expect(fetchPage).toHaveBeenCalledTimes(1);
     expect(events).toEqual([{ id: 'm1', type: 'agent.message' }]);
+  });
+});
+
+describe('buildSessionEventsStreamUrl', () => {
+  it('uses /events/stream per Ark session event stream API', () => {
+    expect(buildSessionEventsStreamUrl('https://ark.example/api/v3', 'sesn-1')).toBe(
+      'https://ark.example/api/v3/sessions/sesn-1/events/stream',
+    );
   });
 });
