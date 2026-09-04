@@ -1,15 +1,19 @@
 import { createArkSession } from '../clients/arkClient.js';
+import { buildMemoryStoreResource } from '../clients/arkMemoryClient.js';
 import type { AppConfig } from '../config.js';
 import { SessionStore } from '../store/sessionStore.js';
 import { resolveUserKey } from '../utils/hash.js';
+import type { MemoryService } from './memoryService.js';
 
 export class SessionService {
   constructor(
     private readonly config: AppConfig,
     private readonly store: SessionStore,
+    private readonly memoryService: MemoryService,
   ) {}
 
   private async createAndPersist(tokenHash: string, webUserToken: string): Promise<string> {
+    const memoryStoreId = await this.memoryService.getOrCreateUserMemoryStore(tokenHash);
     const { sessionId } = await createArkSession({
       arkApiKey: this.config.arkApiKey,
       arkBaseUrl: this.config.arkBaseUrl,
@@ -17,6 +21,7 @@ export class SessionService {
       baseEnvironmentId: this.config.arkBaseEnvironmentId,
       userId: tokenHash,
       userBearerToken: webUserToken,
+      resources: [buildMemoryStoreResource(memoryStoreId)],
     });
     await this.store.setSessionId(tokenHash, sessionId);
     return sessionId;

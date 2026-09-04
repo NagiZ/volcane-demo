@@ -4,6 +4,7 @@ import type { AppConfig } from './config.js';
 import { createAgentRouter } from './routes/agent.js';
 import type { ChatService } from './services/chatService.js';
 import type { FileService } from './services/fileService.js';
+import type { MemoryService } from './services/memoryService.js';
 import type { SessionService } from './services/sessionService.js';
 
 export function createApp(deps: {
@@ -11,6 +12,7 @@ export function createApp(deps: {
   chatService: ChatService;
   sessionService: SessionService;
   fileService: FileService;
+  memoryService: MemoryService;
 }) {
   const app = express();
   app.use(cors());

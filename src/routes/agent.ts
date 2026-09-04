@@ -3,6 +3,7 @@ import multer from 'multer';
 import { ArkApiError } from '../clients/arkClient.js';
 import type { ChatService } from '../services/chatService.js';
 import type { FileService } from '../services/fileService.js';
+import type { MemoryService } from '../services/memoryService.js';
 import type { SessionService } from '../services/sessionService.js';
 
 const upload = multer({
@@ -37,6 +38,7 @@ export function createAgentRouter(deps: {
   chatService: ChatService;
   sessionService: SessionService;
   fileService: FileService;
+  memoryService: MemoryService;
 }): Router {
   const router = Router();
 
@@ -184,6 +186,55 @@ export function createAgentRouter(deps: {
     } catch (err) {
       return res.status(503).json({
         error: err instanceof Error ? err.message : 'List messages failed',
+      });
+    }
+  });
+
+  router.get('/memory', async (req: Request, res: Response) => {
+    const tokenErr = requireNonEmptyString(req.query?.webUserToken, 'webUserToken');
+    if (tokenErr) return res.status(400).json({ error: tokenErr });
+    const filePath =
+      typeof req.query?.filePath === 'string' ? req.query.filePath : undefined;
+    try {
+      const result = await deps.memoryService.readUserMemory(
+        String(req.query.webUserToken).trim(),
+        filePath,
+      );
+      return res.status(200).json(result);
+    } catch (err) {
+      if (err instanceof ArkApiError && err.status === 404) {
+        return res.status(404).json({ error: err.message });
+      }
+      if (err instanceof ArkApiError && err.status === 503) {
+        return res.status(503).json({ error: err.message });
+      }
+      return res.status(502).json({
+        error: err instanceof Error ? err.message : 'Read memory failed',
+      });
+    }
+  });
+
+  router.post('/memory', async (req: Request, res: Response) => {
+    const tokenErr = requireNonEmptyString(req.body?.webUserToken, 'webUserToken');
+    const contentErr = requireNonEmptyString(req.body?.content, 'content');
+    if (tokenErr || contentErr) {
+      return res.status(400).json({ error: tokenErr ?? contentErr });
+    }
+    const filePath =
+      typeof req.body?.filePath === 'string' ? req.body.filePath : undefined;
+    try {
+      const result = await deps.memoryService.writeUserMemory(
+        req.body.webUserToken.trim(),
+        filePath,
+        req.body.content,
+      );
+      return res.status(200).json(result);
+    } catch (err) {
+      if (err instanceof ArkApiError && err.status === 503) {
+        return res.status(503).json({ error: err.message });
+      }
+      return res.status(502).json({
+        error: err instanceof Error ? err.message : 'Write memory failed',
       });
     }
   });
