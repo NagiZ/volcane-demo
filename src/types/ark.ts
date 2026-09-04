@@ -1,3 +1,9 @@
+export interface ArkMemoryStoreResource {
+  type: 'memory_store';
+  memory_store_id: string;
+  instructions?: string;
+}
+
 export interface CreateSessionParams {
   arkApiKey: string;
   arkBaseUrl: string;
@@ -5,8 +11,17 @@ export interface CreateSessionParams {
   baseEnvironmentId: string;
   userId: string;
   userBearerToken: string;
-  /** 可选自定义 session id */
   sessionId?: string;
+  /** 仅创建时可挂载；memory_store 不能事后追加 */
+  resources?: ArkMemoryStoreResource[];
+}
+
+export interface ArkMemoryFileInfo {
+  id: string;
+  path: string;
+  content: string;
+  updated_at?: string;
+  content_sha256?: string;
 }
 
 export interface SendEventParams {

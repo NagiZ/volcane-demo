@@ -38,6 +38,43 @@ describe('buildCreateSessionBody', () => {
     // 前端输入的 token 需作为 Agent 启动密钥注入
     expect(config.env.LEYO_AGENT_KEY).toBe('token');
   });
+
+  it('includes memory_store resources when provided', () => {
+    const body = buildCreateSessionBody({
+      arkApiKey: 'k',
+      arkBaseUrl: 'https://example.com/api/v3',
+      agentId: 'agent-1',
+      baseEnvironmentId: 'env-1',
+      userId: 'user-hash',
+      userBearerToken: 'token',
+      resources: [
+        {
+          type: 'memory_store',
+          memory_store_id: 'memstore-1',
+          instructions: 'read user_profile.json',
+        },
+      ],
+    });
+    expect(body.resources).toEqual([
+      {
+        type: 'memory_store',
+        memory_store_id: 'memstore-1',
+        instructions: 'read user_profile.json',
+      },
+    ]);
+  });
+
+  it('omits resources when not provided', () => {
+    const body = buildCreateSessionBody({
+      arkApiKey: 'k',
+      arkBaseUrl: 'https://example.com/api/v3',
+      agentId: 'agent-1',
+      baseEnvironmentId: 'env-1',
+      userId: 'user-hash',
+      userBearerToken: 'token',
+    });
+    expect(body).not.toHaveProperty('resources');
+  });
 });
 
 describe('buildSendSessionEventsBody', () => {

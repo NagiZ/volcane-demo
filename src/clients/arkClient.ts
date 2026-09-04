@@ -101,6 +101,9 @@ export function buildCreateSessionBody(params: CreateSessionParams): Record<stri
     },
   };
   if (params.sessionId) body.id = params.sessionId;
+  if (params.resources && params.resources.length > 0) {
+    body.resources = params.resources;
+  }
   return body;
 }
 
