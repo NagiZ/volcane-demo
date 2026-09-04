@@ -140,6 +140,15 @@ export class MemoryService {
     return { success: true, path };
   }
 
+  private isShaConflictError(err: unknown): boolean {
+    if (!(err instanceof ArkApiError)) return false;
+    if (err.status === 409 || err.status === 412) return true;
+    const code = (err.code ?? '').toLowerCase();
+    return (
+      code.includes('conflict') || code.includes('precondition') || code.includes('sha')
+    );
+  }
+
   private async updateWithOptionalRetry(
     memoryStoreId: string,
     memoryId: string,
@@ -161,8 +170,7 @@ export class MemoryService {
         contentSha256: current.content_sha256,
       });
     } catch (err) {
-      const status = err instanceof ArkApiError ? err.status : undefined;
-      if (status !== 409 && status !== 412 && status !== 400) throw err;
+      if (!this.isShaConflictError(err)) throw err;
       const fresh = await getMemoryFile({
         arkApiKey: this.config.arkApiKey,
         arkBaseUrl: this.config.arkBaseUrl,

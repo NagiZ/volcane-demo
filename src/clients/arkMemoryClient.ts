@@ -55,13 +55,18 @@ export function buildMemoryStoreResource(
   };
 }
 
+function pickStringField(obj: Record<string, unknown>, ...keys: string[]): string {
+  for (const key of keys) {
+    const v = obj[key];
+    if (typeof v === 'string' && v) return v;
+  }
+  return '';
+}
+
 export function normalizeMemoryFile(raw: unknown): ArkMemoryFileInfo | null {
   if (!raw || typeof raw !== 'object') return null;
   const o = raw as Record<string, unknown>;
-  const id =
-    (typeof o.id === 'string' && o.id) ||
-    (typeof o.memory_id === 'string' && o.memory_id) ||
-    '';
+  const id = pickStringField(o, 'id', 'memory_id');
   const path = typeof o.path === 'string' ? o.path : '';
   const content = typeof o.content === 'string' ? o.content : '';
   if (!id || !path) return null;
@@ -72,6 +77,11 @@ export function normalizeMemoryFile(raw: unknown): ArkMemoryFileInfo | null {
     ...(typeof o.updated_at === 'string' ? { updated_at: o.updated_at } : {}),
     ...(typeof o.content_sha256 === 'string' ? { content_sha256: o.content_sha256 } : {}),
   };
+}
+
+function pickMemoryStoreId(raw: unknown): string {
+  if (!raw || typeof raw !== 'object') return '';
+  return pickStringField(raw as Record<string, unknown>, 'id', 'memory_store_id');
 }
 
 export interface MemoryClientBaseParams {
@@ -89,10 +99,7 @@ export async function createMemoryStore(
       { name: params.name, description: params.description },
       { headers: authHeaders(params.arkApiKey), timeout: NO_TIMEOUT, signal: params.signal },
     );
-    const id =
-      res.data && typeof res.data === 'object' && typeof (res.data as { id?: unknown }).id === 'string'
-        ? (res.data as { id: string }).id
-        : '';
+    const id = pickMemoryStoreId(res.data);
     if (!id) throw new ArkApiError('Create memory store response missing id');
     return { id };
   } catch (err) {
@@ -108,9 +115,13 @@ export async function getMemoryStoreInfo(
       `${params.arkBaseUrl}/memory_stores/${encodeURIComponent(params.memoryStoreId)}`,
       { headers: authHeaders(params.arkApiKey), timeout: NO_TIMEOUT, signal: params.signal },
     );
-    const data = res.data as { id?: string; name?: string };
-    if (!data?.id) throw new ArkApiError('Get memory store response missing id');
-    return { id: data.id, ...(data.name ? { name: data.name } : {}) };
+    const id = pickMemoryStoreId(res.data);
+    if (!id) throw new ArkApiError('Get memory store response missing id');
+    const name =
+      res.data && typeof res.data === 'object' && typeof (res.data as { name?: unknown }).name === 'string'
+        ? (res.data as { name: string }).name
+        : undefined;
+    return { id, ...(name ? { name } : {}) };
   } catch (err) {
     throw toArkError(err);
   }
@@ -139,7 +150,7 @@ export async function listMemoryFiles(
       .map((item) => {
         if (!item || typeof item !== 'object') return null;
         const o = item as Record<string, unknown>;
-        const id = typeof o.id === 'string' ? o.id : '';
+        const id = pickStringField(o, 'id', 'memory_id');
         const path = typeof o.path === 'string' ? o.path : '';
         return id && path ? { id, path } : null;
       })

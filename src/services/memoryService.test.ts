@@ -8,6 +8,7 @@ vi.mock('../clients/arkMemoryClient.js', () => ({
   updateMemoryFile: vi.fn(),
 }));
 
+import { ArkApiError } from '../clients/arkClient.js';
 import {
   createMemoryFile,
   createMemoryStore,
@@ -23,6 +24,15 @@ const config = {
   arkApiKey: 'k',
   arkBaseUrl: 'https://example.com/api/v3',
 } as AppConfig;
+
+function memoryStoreStub(id = 'memstore-1'): UserMemoryRedisStore {
+  return {
+    getMemoryStoreId: vi.fn().mockResolvedValue(id),
+    tryAcquireCreateLock: vi.fn(),
+    setMemoryStoreId: vi.fn(),
+    releaseCreateLock: vi.fn(),
+  } as unknown as UserMemoryRedisStore;
+}
 
 describe('MemoryService', () => {
   beforeEach(() => {
@@ -80,12 +90,7 @@ describe('MemoryService', () => {
   });
 
   it('write updates when path exists', async () => {
-    const store = {
-      getMemoryStoreId: vi.fn().mockResolvedValue('memstore-1'),
-      tryAcquireCreateLock: vi.fn(),
-      setMemoryStoreId: vi.fn(),
-      releaseCreateLock: vi.fn(),
-    } as unknown as UserMemoryRedisStore;
+    const store = memoryStoreStub();
     vi.mocked(findMemoryByPath).mockResolvedValue({ id: 'm1', path: '/user_profile.json' });
     vi.mocked(getMemoryFile).mockResolvedValue({
       id: 'm1',
@@ -106,5 +111,93 @@ describe('MemoryService', () => {
     expect(updateMemoryFile).toHaveBeenCalledWith(
       expect.objectContaining({ memoryId: 'm1', content: 'new', contentSha256: 'sha' }),
     );
+  });
+
+  it('retries update on 409 conflict then succeeds', async () => {
+    const store = memoryStoreStub();
+    vi.mocked(findMemoryByPath).mockResolvedValue({ id: 'm1', path: '/user_profile.json' });
+    vi.mocked(getMemoryFile)
+      .mockResolvedValueOnce({
+        id: 'm1',
+        path: '/user_profile.json',
+        content: 'old',
+        content_sha256: 'sha-old',
+      })
+      .mockResolvedValueOnce({
+        id: 'm1',
+        path: '/user_profile.json',
+        content: 'other',
+        content_sha256: 'sha-fresh',
+      });
+    vi.mocked(updateMemoryFile)
+      .mockRejectedValueOnce(new ArkApiError('sha mismatch', { status: 409, code: 'conflict' }))
+      .mockResolvedValueOnce({
+        id: 'm1',
+        path: '/user_profile.json',
+        content: 'new',
+        content_sha256: 'sha-fresh',
+      });
+
+    const svc = new MemoryService(config, store);
+    await expect(svc.writeUserMemory('token', '/user_profile.json', 'new')).resolves.toEqual({
+      success: true,
+      path: '/user_profile.json',
+    });
+    expect(updateMemoryFile).toHaveBeenCalledTimes(2);
+    expect(updateMemoryFile).toHaveBeenLastCalledWith(
+      expect.objectContaining({ contentSha256: 'sha-fresh' }),
+    );
+  });
+
+  it('retries update when code indicates sha/precondition conflict', async () => {
+    const store = memoryStoreStub();
+    vi.mocked(findMemoryByPath).mockResolvedValue({ id: 'm1', path: '/user_profile.json' });
+    vi.mocked(getMemoryFile)
+      .mockResolvedValueOnce({
+        id: 'm1',
+        path: '/user_profile.json',
+        content: 'old',
+        content_sha256: 'sha-old',
+      })
+      .mockResolvedValueOnce({
+        id: 'm1',
+        path: '/user_profile.json',
+        content: 'other',
+        content_sha256: 'sha-fresh',
+      });
+    vi.mocked(updateMemoryFile)
+      .mockRejectedValueOnce(
+        new ArkApiError('precondition failed', { status: 400, code: 'ContentShaPrecondition' }),
+      )
+      .mockResolvedValueOnce({
+        id: 'm1',
+        path: '/user_profile.json',
+        content: 'new',
+      });
+
+    const svc = new MemoryService(config, store);
+    await expect(svc.writeUserMemory('token', '/user_profile.json', 'new')).resolves.toEqual({
+      success: true,
+      path: '/user_profile.json',
+    });
+    expect(updateMemoryFile).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not retry plain HTTP 400 without conflict code', async () => {
+    const store = memoryStoreStub();
+    vi.mocked(findMemoryByPath).mockResolvedValue({ id: 'm1', path: '/user_profile.json' });
+    vi.mocked(getMemoryFile).mockResolvedValue({
+      id: 'm1',
+      path: '/user_profile.json',
+      content: 'old',
+      content_sha256: 'sha',
+    });
+    const badRequest = new ArkApiError('invalid content', { status: 400, code: 'invalid_request' });
+    vi.mocked(updateMemoryFile).mockRejectedValueOnce(badRequest);
+
+    const svc = new MemoryService(config, store);
+    await expect(svc.writeUserMemory('token', '/user_profile.json', 'new')).rejects.toBe(badRequest);
+    expect(updateMemoryFile).toHaveBeenCalledTimes(1);
+    expect(getMemoryFile).toHaveBeenCalledTimes(1);
   });
 });
