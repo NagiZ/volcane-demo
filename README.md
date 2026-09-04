@@ -65,6 +65,44 @@ curl -X POST http://127.0.0.1:3000/api/agent/rebuild-session \
   -d '{"webUserToken":"demo-token"}'
 ```
 
+## 持久化记忆（Memory Store）
+
+每个 `webUserToken`（经 sha256）绑定一个永久记忆库；创建/重建会话时自动挂载。业务层可直接读写记忆文件。
+
+### 写入记忆
+
+```bash
+curl -X POST http://127.0.0.1:3000/api/agent/memory \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "webUserToken":"demo-user",
+    "filePath":"/user_profile.json",
+    "content":"{\"theme\":\"dark\",\"locale\":\"zh-CN\"}"
+  }'
+```
+
+### 读取记忆
+
+```bash
+curl 'http://127.0.0.1:3000/api/agent/memory?webUserToken=demo-user&filePath=/user_profile.json'
+```
+
+### 验证挂载（对话）
+
+```bash
+curl -N -X POST http://127.0.0.1:3000/api/agent/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"webUserToken":"demo-user","userMessage":"请先读取记忆库中的 user_profile.json 并复述偏好"}'
+```
+
+### 重建会话后记忆应保留
+
+```bash
+curl -X POST http://127.0.0.1:3000/api/agent/rebuild-session \
+  -H 'Content-Type: application/json' \
+  -d '{"webUserToken":"demo-user"}'
+```
+
 ## 文件交互
 
 上传文件、挂载到会话沙箱、消息内直读引用，以及查询 Agent 产物文件。
