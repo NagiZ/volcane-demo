@@ -124,7 +124,7 @@ webUserToken
 - **成功 200**：`{ "success": true, "path": "/user_profile.json" }`
 - **隔离**：只能操作当前 token 对应记忆库
 
-路径缺省与校验：`filePath` 空则 `/user_profile.json`；不以 `/` 开头则自动补 `/` 或返回 400（实现时统一：自动补前导 `/`）。
+路径缺省与校验：`filePath` 空则 `/user_profile.json`；不以 `/` 开头则自动补前导 `/`（例如 `user_profile.json` → `/user_profile.json`）。
 
 ## 6. 会话创建 / 重建与挂载
 
