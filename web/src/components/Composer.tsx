@@ -240,6 +240,7 @@ export function Composer({
         <textarea
           className="composer__input"
           rows={3}
+          cols={1}
           value={draft}
           disabled={disabled}
           onChange={(event) => setDraft(event.target.value)}

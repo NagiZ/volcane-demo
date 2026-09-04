@@ -17,10 +17,10 @@ export function MessageList({ messages, waiting }: MessageListProps) {
   if (messages.length === 0 && !waiting) {
     return (
       <section className="thread thread--empty">
-        <p className="empty__eyebrow">观测台已就位</p>
+        <p className="empty__eyebrow">就绪</p>
         <h2 className="empty__title">跟 Agent 说第一句话</h2>
         <p className="empty__hint">
-          试试：「你好，请用一句话自我介绍」。多轮对话会沿用同一 Session，改 token 会换用户。
+          试试：「你好，请用一句话自我介绍」。多轮对话沿用同一 Session，改 token 会换用户。
         </p>
       </section>
     );

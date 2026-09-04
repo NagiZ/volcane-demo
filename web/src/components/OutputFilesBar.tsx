@@ -15,7 +15,7 @@ function formatSize(bytes: number): string {
 }
 
 export function OutputFilesBar({ token, disabled, refreshToken }: OutputFilesBarProps) {
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(true);
   const [files, setFiles] = useState<OutputFileItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
