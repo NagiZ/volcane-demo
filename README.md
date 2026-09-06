@@ -2,6 +2,9 @@
 
 基于 Express 的 HTTP 代理服务，将前端请求转发至火山方舟（Ark）托管 Agent，并通过 Redis 维护用户与 Session 的映射关系。
 
+> 📐 **架构与功能说明**：[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) —— 分层结构、关键链路时序图
+> （对话 / Custom Tool 回环 / 收口状态机 / 文件交互 / 记忆库 / 中止 / Session 重建）、API 契约与坑位清单。
+
 ## 前置条件
 
 - **Node.js 18+**
