@@ -100,6 +100,32 @@ describe('SessionService vault', () => {
     );
     expect(store.setSessionId).not.toHaveBeenCalled();
     expect(store.setVaultId).not.toHaveBeenCalled();
+    expect(store.deleteSession).toHaveBeenCalled();
+    expect(store.deleteVaultId).toHaveBeenCalled();
+  });
+
+  it('rolls back session and vault when setVaultId fails after setSessionId', async () => {
+    const store = makeStore({
+      setVaultId: vi.fn().mockRejectedValue(new Error('redis-vault-fail')),
+    });
+    const memoryService = {
+      getOrCreateUserMemoryStore: vi.fn().mockResolvedValue('memstore-42'),
+    } as unknown as MemoryService;
+    vi.mocked(createEnvVault).mockResolvedValue({ vaultId: 'vault-1' });
+    vi.mocked(createArkSession).mockResolvedValue({ sessionId: 'sess-1' });
+    vi.mocked(deleteVault).mockResolvedValue(undefined);
+
+    const svc = new SessionService(config, store, memoryService);
+    await expect(svc.getOrCreateSession('web-token')).rejects.toThrow(
+      'redis-vault-fail',
+    );
+    expect(store.setSessionId).toHaveBeenCalled();
+    expect(store.setVaultId).toHaveBeenCalled();
+    expect(store.deleteSession).toHaveBeenCalled();
+    expect(store.deleteVaultId).toHaveBeenCalled();
+    expect(deleteVault).toHaveBeenCalledWith(
+      expect.objectContaining({ vaultId: 'vault-1' }),
+    );
   });
 
   it('rebuildSession deletes old vault then creates new session', async () => {
@@ -131,6 +157,7 @@ describe('SessionService vault', () => {
   });
 
   it('rebuildSession continues create path when deleteVault(old) rejects', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const store = makeStore({
       getVaultId: vi.fn().mockResolvedValue('vault-old'),
     });
@@ -145,10 +172,15 @@ describe('SessionService vault', () => {
     const result = await svc.rebuildSession('web-token');
 
     expect(result).toMatchObject({ sessionId: 'sess-new', vaultId: 'vault-new' });
+    expect(warnSpy).toHaveBeenCalledWith(
+      'rebuildSession: deleteVault(old) failed',
+      expect.objectContaining({ vaultId: 'vault-old' }),
+    );
     expect(store.deleteVaultId).toHaveBeenCalled();
     expect(store.deleteSession).toHaveBeenCalled();
     expect(createEnvVault).toHaveBeenCalled();
     expect(createArkSession).toHaveBeenCalled();
+    warnSpy.mockRestore();
   });
 
   it('deleteVaultForToken deletes upstream and vault map only', async () => {

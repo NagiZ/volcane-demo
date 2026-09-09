@@ -33,10 +33,43 @@ export class SessionService {
         vaultIds: [vaultId],
         resources: [buildMemoryStoreResource(memoryStoreId)],
       });
-      await this.store.setSessionId(tokenHash, sessionId);
-      await this.store.setVaultId(tokenHash, vaultId);
+      try {
+        await this.store.setSessionId(tokenHash, sessionId);
+        await this.store.setVaultId(tokenHash, vaultId);
+      } catch (redisErr) {
+        try {
+          await this.store.deleteSession(tokenHash);
+        } catch {
+          // 尽力回滚
+        }
+        try {
+          await this.store.deleteVaultId(tokenHash);
+        } catch {
+          // 尽力回滚
+        }
+        try {
+          await deleteVault({
+            arkApiKey: this.config.arkApiKey,
+            arkBaseUrl: this.config.arkBaseUrl,
+            vaultId,
+          });
+        } catch {
+          // 尽力回滚
+        }
+        throw redisErr;
+      }
       return { sessionId, vaultId };
     } catch (err) {
+      try {
+        await this.store.deleteSession(tokenHash);
+      } catch {
+        // 尽力回滚
+      }
+      try {
+        await this.store.deleteVaultId(tokenHash);
+      } catch {
+        // 尽力回滚
+      }
       try {
         await deleteVault({
           arkApiKey: this.config.arkApiKey,
@@ -81,8 +114,11 @@ export class SessionService {
           arkBaseUrl: this.config.arkBaseUrl,
           vaultId: oldVaultId,
         });
-      } catch {
-        // 尽力删除旧 Vault
+      } catch (err) {
+        console.warn('rebuildSession: deleteVault(old) failed', {
+          vaultId: oldVaultId,
+          err,
+        });
       }
       await this.store.deleteVaultId(tokenHash);
     }
