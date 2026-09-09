@@ -90,13 +90,9 @@ export function buildCreateSessionBody(params: CreateSessionParams): Record<stri
     environment: {
       type: 'environment_with_overrides',
       id: params.baseEnvironmentId,
-      config: {
-        env: {
-          USER_ID: params.userId,
-        },
-        vault_ids: params.vaultIds,
-      },
     },
+    // 与 environment 平级；LEYO_AGENT_KEY 由 Vault Credential 注入，不进 config.env
+    vault_ids: params.vaultIds,
   };
   if (params.sessionId) body.id = params.sessionId;
   if (params.resources && params.resources.length > 0) {

@@ -10,6 +10,10 @@ function vaultRedisKey(tokenHash: string): string {
   return `ark:vault:map:${tokenHash}`;
 }
 
+function credentialRedisKey(tokenHash: string): string {
+  return `ark:vault:cred:${tokenHash}`;
+}
+
 export class SessionStore {
   constructor(private readonly redis: Redis) {}
 
@@ -35,5 +39,17 @@ export class SessionStore {
 
   async deleteVaultId(tokenHash: string): Promise<void> {
     await this.redis.del(vaultRedisKey(tokenHash));
+  }
+
+  async getCredentialId(tokenHash: string): Promise<string | null> {
+    return this.redis.get(credentialRedisKey(tokenHash));
+  }
+
+  async setCredentialId(tokenHash: string, credentialId: string): Promise<void> {
+    await this.redis.set(credentialRedisKey(tokenHash), credentialId, 'EX', SESSION_TTL_SECONDS);
+  }
+
+  async deleteCredentialId(tokenHash: string): Promise<void> {
+    await this.redis.del(credentialRedisKey(tokenHash));
   }
 }

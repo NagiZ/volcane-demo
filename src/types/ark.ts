@@ -9,7 +9,8 @@ export interface CreateSessionParams {
   arkBaseUrl: string;
   agentId: string;
   baseEnvironmentId: string;
-  userId: string;
+  /** @deprecated 不再注入 config.env；保留字段以免大范围改调用方 */
+  userId?: string;
   vaultIds: string[];
   sessionId?: string;
   /** 仅创建时可挂载；memory_store 不能事后追加 */

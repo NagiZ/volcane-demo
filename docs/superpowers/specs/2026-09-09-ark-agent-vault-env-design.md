@@ -18,8 +18,9 @@
 
 ```
 webUserToken
-  → createEnvVault(secret_name=LEYO_AGENT_KEY) → vaultId
-  → Redis ark:vault:map:{tokenHash} = vaultId
+  → POST /vaults { display_name } → vaultId（空容器，禁止带 auth）
+  → POST /vaults/{vaultId}/credentials { auth: environment_variable LEYO_AGENT_KEY }
+  → Redis ark:vault:map / ark:vault:cred
   → POST /sessions { env: { USER_ID }, vault_ids: [vaultId] }
   → Skill 读 LEYO_AGENT_KEY（占位符对外不可见明文）
   → DELETE /api/agent/vault { webUserToken } → DeleteVault → 清映射
@@ -86,26 +87,31 @@ webUserToken
 
 ## 5. 上游请求体
 
-### 5.1 创建 Vault
+### 5.1 创建 Vault + Credential（两层，禁止在 Vault 根请求带 auth）
 
-`POST {arkBaseUrl}/vaults`
+`POST {arkBaseUrl}/vaults` — 仅空容器：
+
+```json
+{ "display_name": "debug-leyo-vault-<短随机>" }
+```
+
+`POST {arkBaseUrl}/vaults/{vault_id}/credentials` — 写入唯一凭据：
 
 ```json
 {
-  "name": "debug-token-<短随机>",
-  "type": "environment_variable",
-  "config": {
-    "auth": {
-      "type": "environment_variable",
-      "secret_name": "LEYO_AGENT_KEY",
-      "secret_value": "<webUserToken>",
-      "networking": { "type": "unrestricted" }
-    }
+  "display_name": "leyo-agent-key-cred",
+  "auth": {
+    "type": "environment_variable",
+    "secret_name": "LEYO_AGENT_KEY",
+    "secret_value": "<webUserToken>",
+    "networking": { "type": "unrestricted" }
   }
 }
 ```
 
-响应取 `id` → `vaultId`。
+响应分别取 `id` → `vaultId` / `credentialId`。控制台 Vault 详情凭据列表应可见该 credential。
+
+`PUT .../credentials/{credential_id}` 可更新 `secret_value`（无需重建 Session）。
 
 ### 5.2 CreateSession
 

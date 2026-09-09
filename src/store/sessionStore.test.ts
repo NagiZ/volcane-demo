@@ -38,4 +38,17 @@ describe('SessionStore vault map', () => {
     await store.deleteVaultId('hash1');
     await expect(store.getVaultId('hash1')).resolves.toBeNull();
   });
+
+  it('sets and gets credential id', async () => {
+    const redis = fakeRedis();
+    const store = new SessionStore(redis as never);
+    await store.setCredentialId('hash1', 'cred-1');
+    expect(redis.set).toHaveBeenCalledWith(
+      'ark:vault:cred:hash1',
+      'cred-1',
+      'EX',
+      SESSION_TTL_SECONDS,
+    );
+    await expect(store.getCredentialId('hash1')).resolves.toBe('cred-1');
+  });
 });

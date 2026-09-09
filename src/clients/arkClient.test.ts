@@ -26,20 +26,14 @@ describe('buildCreateSessionBody', () => {
     expect(body.agent).toBe('agent-1');
     expect(body).not.toHaveProperty('agent_id');
     expect(body).not.toHaveProperty('environment_id');
+    expect(body.vault_ids).toEqual(['vault-1']);
 
     const environment = body.environment as Record<string, unknown>;
     expect(environment.type).toBe('environment_with_overrides');
     expect(environment.id).toBe('env-1');
     expect(environment).not.toHaveProperty('environment_id');
-
-    const config = environment.config as {
-      env: Record<string, string>;
-      vault_ids: string[];
-    };
-    expect(config.env).toEqual({ USER_ID: 'user-hash' });
-    expect(config.env).not.toHaveProperty('USER_BEARER_TOKEN');
-    expect(config.env).not.toHaveProperty('LEYO_AGENT_KEY');
-    expect(config.vault_ids).toEqual(['vault-1']);
+    expect(environment).not.toHaveProperty('config');
+    expect(environment).not.toHaveProperty('vault_ids');
   });
 
   it('includes memory_store resources when provided', () => {

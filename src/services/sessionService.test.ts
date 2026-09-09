@@ -14,12 +14,17 @@ vi.mock('../clients/arkClient.js', () => ({
 }));
 
 vi.mock('../clients/arkVaultClient.js', () => ({
-  createEnvVault: vi.fn(),
+  createVaultWithLeyoCredential: vi.fn(),
   deleteVault: vi.fn(),
+  updateCredential: vi.fn(),
 }));
 
 import { createArkSession } from '../clients/arkClient.js';
-import { createEnvVault, deleteVault } from '../clients/arkVaultClient.js';
+import {
+  createVaultWithLeyoCredential,
+  deleteVault,
+  updateCredential,
+} from '../clients/arkVaultClient.js';
 import { DEFAULT_MEMORY_INSTRUCTIONS } from '../clients/arkMemoryClient.js';
 import type { AppConfig } from '../config.js';
 import type { SessionStore } from '../store/sessionStore.js';
@@ -41,6 +46,9 @@ function makeStore(overrides: Partial<SessionStore> = {}) {
     getVaultId: vi.fn().mockResolvedValue(null),
     setVaultId: vi.fn().mockResolvedValue(undefined),
     deleteVaultId: vi.fn().mockResolvedValue(undefined),
+    getCredentialId: vi.fn().mockResolvedValue(null),
+    setCredentialId: vi.fn().mockResolvedValue(undefined),
+    deleteCredentialId: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   } as unknown as SessionStore;
 }
@@ -50,19 +58,22 @@ describe('SessionService vault', () => {
     vi.clearAllMocks();
   });
 
-  it('create path creates vault, passes vaultIds, stores mapping', async () => {
+  it('create path creates vault+credential, passes vaultIds, stores mapping', async () => {
     const store = makeStore();
     const memoryService = {
       getOrCreateUserMemoryStore: vi.fn().mockResolvedValue('memstore-42'),
     } as unknown as MemoryService;
-    vi.mocked(createEnvVault).mockResolvedValue({ vaultId: 'vault-1' });
+    vi.mocked(createVaultWithLeyoCredential).mockResolvedValue({
+      vaultId: 'vault-1',
+      credentialId: 'cred-1',
+    });
     vi.mocked(createArkSession).mockResolvedValue({ sessionId: 'sess-1' });
 
     const svc = new SessionService(config, store, memoryService);
     const result = await svc.getOrCreateSession('web-token');
 
     expect(result).toMatchObject({ sessionId: 'sess-1', vaultId: 'vault-1' });
-    expect(createEnvVault).toHaveBeenCalledWith(
+    expect(createVaultWithLeyoCredential).toHaveBeenCalledWith(
       expect.objectContaining({ secretValue: 'web-token' }),
     );
     expect(createArkSession).toHaveBeenCalledWith(
@@ -80,7 +91,8 @@ describe('SessionService vault', () => {
     expect(createArkSession).toHaveBeenCalledWith(
       expect.not.objectContaining({ userBearerToken: expect.anything() }),
     );
-    expect(store.setVaultId).toHaveBeenCalled();
+    expect(store.setVaultId).toHaveBeenCalledWith(expect.any(String), 'vault-1');
+    expect(store.setCredentialId).toHaveBeenCalledWith(expect.any(String), 'cred-1');
     expect(store.setSessionId).toHaveBeenCalled();
   });
 
@@ -89,7 +101,10 @@ describe('SessionService vault', () => {
     const memoryService = {
       getOrCreateUserMemoryStore: vi.fn().mockResolvedValue('memstore-42'),
     } as unknown as MemoryService;
-    vi.mocked(createEnvVault).mockResolvedValue({ vaultId: 'vault-1' });
+    vi.mocked(createVaultWithLeyoCredential).mockResolvedValue({
+      vaultId: 'vault-1',
+      credentialId: 'cred-1',
+    });
     vi.mocked(createArkSession).mockRejectedValue(new Error('boom'));
     vi.mocked(deleteVault).mockResolvedValue(undefined);
 
@@ -102,6 +117,7 @@ describe('SessionService vault', () => {
     expect(store.setVaultId).not.toHaveBeenCalled();
     expect(store.deleteSession).toHaveBeenCalled();
     expect(store.deleteVaultId).toHaveBeenCalled();
+    expect(store.deleteCredentialId).toHaveBeenCalled();
   });
 
   it('rolls back session and vault when setVaultId fails after setSessionId', async () => {
@@ -111,7 +127,10 @@ describe('SessionService vault', () => {
     const memoryService = {
       getOrCreateUserMemoryStore: vi.fn().mockResolvedValue('memstore-42'),
     } as unknown as MemoryService;
-    vi.mocked(createEnvVault).mockResolvedValue({ vaultId: 'vault-1' });
+    vi.mocked(createVaultWithLeyoCredential).mockResolvedValue({
+      vaultId: 'vault-1',
+      credentialId: 'cred-1',
+    });
     vi.mocked(createArkSession).mockResolvedValue({ sessionId: 'sess-1' });
     vi.mocked(deleteVault).mockResolvedValue(undefined);
 
@@ -123,6 +142,7 @@ describe('SessionService vault', () => {
     expect(store.setVaultId).toHaveBeenCalled();
     expect(store.deleteSession).toHaveBeenCalled();
     expect(store.deleteVaultId).toHaveBeenCalled();
+    expect(store.deleteCredentialId).toHaveBeenCalled();
     expect(deleteVault).toHaveBeenCalledWith(
       expect.objectContaining({ vaultId: 'vault-1' }),
     );
@@ -136,7 +156,10 @@ describe('SessionService vault', () => {
       getOrCreateUserMemoryStore: vi.fn().mockResolvedValue('memstore-42'),
     } as unknown as MemoryService;
     vi.mocked(deleteVault).mockResolvedValue(undefined);
-    vi.mocked(createEnvVault).mockResolvedValue({ vaultId: 'vault-new' });
+    vi.mocked(createVaultWithLeyoCredential).mockResolvedValue({
+      vaultId: 'vault-new',
+      credentialId: 'cred-new',
+    });
     vi.mocked(createArkSession).mockResolvedValue({ sessionId: 'sess-new' });
 
     const svc = new SessionService(config, store, memoryService);
@@ -147,12 +170,14 @@ describe('SessionService vault', () => {
       expect.objectContaining({ vaultId: 'vault-old' }),
     );
     expect(store.deleteVaultId).toHaveBeenCalled();
+    expect(store.deleteCredentialId).toHaveBeenCalled();
     expect(store.deleteSession).toHaveBeenCalled();
-    expect(createEnvVault).toHaveBeenCalled();
+    expect(createVaultWithLeyoCredential).toHaveBeenCalled();
     expect(createArkSession).toHaveBeenCalledWith(
       expect.objectContaining({ vaultIds: ['vault-new'] }),
     );
     expect(store.setVaultId).toHaveBeenCalled();
+    expect(store.setCredentialId).toHaveBeenCalled();
     expect(store.setSessionId).toHaveBeenCalled();
   });
 
@@ -165,7 +190,10 @@ describe('SessionService vault', () => {
       getOrCreateUserMemoryStore: vi.fn().mockResolvedValue('memstore-42'),
     } as unknown as MemoryService;
     vi.mocked(deleteVault).mockRejectedValueOnce(new Error('delete-old-failed'));
-    vi.mocked(createEnvVault).mockResolvedValue({ vaultId: 'vault-new' });
+    vi.mocked(createVaultWithLeyoCredential).mockResolvedValue({
+      vaultId: 'vault-new',
+      credentialId: 'cred-new',
+    });
     vi.mocked(createArkSession).mockResolvedValue({ sessionId: 'sess-new' });
 
     const svc = new SessionService(config, store, memoryService);
@@ -178,7 +206,7 @@ describe('SessionService vault', () => {
     );
     expect(store.deleteVaultId).toHaveBeenCalled();
     expect(store.deleteSession).toHaveBeenCalled();
-    expect(createEnvVault).toHaveBeenCalled();
+    expect(createVaultWithLeyoCredential).toHaveBeenCalled();
     expect(createArkSession).toHaveBeenCalled();
     warnSpy.mockRestore();
   });
@@ -196,6 +224,7 @@ describe('SessionService vault', () => {
     });
     expect(deleteVault).toHaveBeenCalled();
     expect(store.deleteVaultId).toHaveBeenCalled();
+    expect(store.deleteCredentialId).toHaveBeenCalled();
     expect(store.deleteSession).not.toHaveBeenCalled();
   });
 
@@ -230,5 +259,28 @@ describe('SessionService vault', () => {
       expect.objectContaining({ vaultId: 'vault-1' }),
     );
     expect(store.deleteVaultId).not.toHaveBeenCalled();
+  });
+
+  it('updateCredentialForToken PUTs secret without rebuilding session', async () => {
+    const store = makeStore({
+      getVaultId: vi.fn().mockResolvedValue('vault-1'),
+      getCredentialId: vi.fn().mockResolvedValue('cred-1'),
+    });
+    const memoryService = {} as MemoryService;
+    vi.mocked(updateCredential).mockResolvedValue(undefined);
+
+    const svc = new SessionService(config, store, memoryService);
+    await expect(svc.updateCredentialForToken('web-token', 'new-tok')).resolves.toEqual({
+      vaultId: 'vault-1',
+      credentialId: 'cred-1',
+    });
+    expect(updateCredential).toHaveBeenCalledWith(
+      expect.objectContaining({
+        vaultId: 'vault-1',
+        credentialId: 'cred-1',
+        secretValue: 'new-tok',
+      }),
+    );
+    expect(createArkSession).not.toHaveBeenCalled();
   });
 });
