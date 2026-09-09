@@ -20,7 +20,7 @@ describe('buildCreateSessionBody', () => {
       agentId: 'agent-1',
       baseEnvironmentId: 'env-1',
       userId: 'user-hash',
-      userBearerToken: 'token',
+      vaultIds: ['vault-1'],
     });
 
     expect(body.agent).toBe('agent-1');
@@ -32,11 +32,14 @@ describe('buildCreateSessionBody', () => {
     expect(environment.id).toBe('env-1');
     expect(environment).not.toHaveProperty('environment_id');
 
-    const config = environment.config as { env: Record<string, string> };
-    expect(config.env.USER_ID).toBe('user-hash');
-    expect(config.env.USER_BEARER_TOKEN).toBe('token');
-    // 前端输入的 token 需作为 Agent 启动密钥注入
-    expect(config.env.LEYO_AGENT_KEY).toBe('token');
+    const config = environment.config as {
+      env: Record<string, string>;
+      vault_ids: string[];
+    };
+    expect(config.env).toEqual({ USER_ID: 'user-hash' });
+    expect(config.env).not.toHaveProperty('USER_BEARER_TOKEN');
+    expect(config.env).not.toHaveProperty('LEYO_AGENT_KEY');
+    expect(config.vault_ids).toEqual(['vault-1']);
   });
 
   it('includes memory_store resources when provided', () => {
@@ -46,7 +49,7 @@ describe('buildCreateSessionBody', () => {
       agentId: 'agent-1',
       baseEnvironmentId: 'env-1',
       userId: 'user-hash',
-      userBearerToken: 'token',
+      vaultIds: ['vault-1'],
       resources: [
         {
           type: 'memory_store',
@@ -71,7 +74,7 @@ describe('buildCreateSessionBody', () => {
       agentId: 'agent-1',
       baseEnvironmentId: 'env-1',
       userId: 'user-hash',
-      userBearerToken: 'token',
+      vaultIds: ['vault-1'],
     });
     expect(body).not.toHaveProperty('resources');
   });

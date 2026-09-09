@@ -10,7 +10,7 @@ export interface CreateSessionParams {
   agentId: string;
   baseEnvironmentId: string;
   userId: string;
-  userBearerToken: string;
+  vaultIds: string[];
   sessionId?: string;
   /** 仅创建时可挂载；memory_store 不能事后追加 */
   resources?: ArkMemoryStoreResource[];

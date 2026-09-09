@@ -20,7 +20,7 @@ export class SessionService {
       agentId: this.config.arkAgentId,
       baseEnvironmentId: this.config.arkBaseEnvironmentId,
       userId: tokenHash,
-      userBearerToken: webUserToken,
+      vaultIds: [], // Task 4 替换为真实 vaultId
       resources: [buildMemoryStoreResource(memoryStoreId)],
     });
     await this.store.setSessionId(tokenHash, sessionId);
