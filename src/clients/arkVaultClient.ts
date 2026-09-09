@@ -48,7 +48,7 @@ export function buildCreateEnvVaultBody(
   nameSuffix: string = randomBytes(4).toString('hex'),
 ): Record<string, unknown> {
   return {
-    name: `debug-token-${nameSuffix}`,
+    display_name: `debug-token-${nameSuffix}`,
     type: 'environment_variable',
     config: {
       auth: {

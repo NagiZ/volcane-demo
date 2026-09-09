@@ -12,7 +12,7 @@ vi.mock('axios');
 describe('buildCreateEnvVaultBody', () => {
   it('uses environment_variable shape and LEYO_AGENT_KEY', () => {
     const body = buildCreateEnvVaultBody('plain-token', 'abc123');
-    expect(body.name).toBe('debug-token-abc123');
+    expect(body.display_name).toBe('debug-token-abc123');
     expect(body.type).toBe('environment_variable');
     const config = body.config as {
       auth: {
@@ -45,7 +45,7 @@ describe('createEnvVault', () => {
     expect(axios.post).toHaveBeenCalledWith(
       'https://example.com/api/v3/vaults',
       expect.objectContaining({
-        name: 'debug-token-x1',
+        display_name: 'debug-token-x1',
         type: 'environment_variable',
       }),
       expect.objectContaining({
