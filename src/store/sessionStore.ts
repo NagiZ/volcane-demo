@@ -6,6 +6,10 @@ function redisKey(tokenHash: string): string {
   return `ark:session:map:${tokenHash}`;
 }
 
+function vaultRedisKey(tokenHash: string): string {
+  return `ark:vault:map:${tokenHash}`;
+}
+
 export class SessionStore {
   constructor(private readonly redis: Redis) {}
 
@@ -19,5 +23,17 @@ export class SessionStore {
 
   async deleteSession(tokenHash: string): Promise<void> {
     await this.redis.del(redisKey(tokenHash));
+  }
+
+  async getVaultId(tokenHash: string): Promise<string | null> {
+    return this.redis.get(vaultRedisKey(tokenHash));
+  }
+
+  async setVaultId(tokenHash: string, vaultId: string): Promise<void> {
+    await this.redis.set(vaultRedisKey(tokenHash), vaultId, 'EX', SESSION_TTL_SECONDS);
+  }
+
+  async deleteVaultId(tokenHash: string): Promise<void> {
+    await this.redis.del(vaultRedisKey(tokenHash));
   }
 }
