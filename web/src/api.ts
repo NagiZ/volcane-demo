@@ -1,5 +1,6 @@
 import type {
   ChatMessage,
+  DeleteVaultResult,
   NormalizedSseEvent,
   OutputFileItem,
   OutputFilesResult,
@@ -141,7 +142,28 @@ export async function rebuildSession(
     ok: true,
     tokenHash: body.tokenHash,
     sessionId: body.sessionId,
+    ...(typeof body.vaultId === 'string' ? { vaultId: body.vaultId } : {}),
   };
+}
+
+export async function deleteVault(
+  webUserToken: string,
+  signal?: AbortSignal,
+): Promise<DeleteVaultResult> {
+  const res = await fetch('/api/agent/vault', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ webUserToken }),
+    signal,
+  });
+  if (!res.ok) {
+    throw new ApiError(res.status, await readJsonError(res, `清理 Vault 失败 (${res.status})`));
+  }
+  const body: unknown = await res.json();
+  if (!isRecord(body) || body.ok !== true || typeof body.vaultId !== 'string') {
+    throw new ApiError(res.status, '清理 Vault 响应格式异常');
+  }
+  return { ok: true, vaultId: body.vaultId };
 }
 
 export async function interruptSession(

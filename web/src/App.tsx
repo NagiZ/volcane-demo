@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ApiError, fetchHealth, fetchSessionMessages, interruptSession, rebuildSession, streamChat } from './api';
+import {
+  ApiError,
+  deleteVault,
+  fetchHealth,
+  fetchSessionMessages,
+  interruptSession,
+  rebuildSession,
+  streamChat,
+} from './api';
 import { Composer, type SendPayload } from './components/Composer';
 import { MessageList } from './components/MessageList';
 import { OutputFilesBar } from './components/OutputFilesBar';
@@ -35,6 +43,7 @@ export function App() {
   const [streaming, setStreaming] = useState(false);
   const [waitingDelta, setWaitingDelta] = useState(false);
   const [rebuilding, setRebuilding] = useState(false);
+  const [deletingVault, setDeletingVault] = useState(false);
   const [interrupting, setInterrupting] = useState(false);
   const [backendStatus, setBackendStatus] = useState<BackendStatus>('checking');
   const [notice, setNotice] = useState<string | null>(null);
@@ -46,7 +55,7 @@ export function App() {
   const streamingRef = useRef(false);
   streamingRef.current = streaming;
 
-  const busy = streaming || rebuilding;
+  const busy = streaming || rebuilding || deletingVault;
 
   const abortInFlight = useCallback(() => {
     abortRef.current?.abort();
@@ -137,12 +146,32 @@ export function App() {
     try {
       const result = await rebuildSession(trimmed);
       setMessages([]);
-      setNotice(`会话已重建 · ${result.sessionId}`);
+      setNotice(
+        result.vaultId
+          ? `会话已重建 · ${result.sessionId} · vault ${result.vaultId}`
+          : `会话已重建 · ${result.sessionId}`,
+      );
     } catch (err) {
       const message = err instanceof ApiError ? err.message : '重建会话失败，请确认后端是否在线';
       setNotice(message);
     } finally {
       setRebuilding(false);
+    }
+  }
+
+  async function handleDeleteVault() {
+    const trimmed = token.trim();
+    if (busy || trimmed.length === 0) return;
+    setDeletingVault(true);
+    setNotice(null);
+    try {
+      const result = await deleteVault(trimmed);
+      setNotice(`Vault 已清理 · ${result.vaultId}`);
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : '清理 Vault 失败';
+      setNotice(message);
+    } finally {
+      setDeletingVault(false);
     }
   }
 
@@ -311,11 +340,15 @@ export function App() {
         token={token}
         backendStatus={backendStatus}
         rebuilding={rebuilding}
+        deletingVault={deletingVault}
         busy={streaming}
         notice={notice}
         onTokenChange={handleTokenChange}
         onRebuild={() => {
           void handleRebuild();
+        }}
+        onDeleteVault={() => {
+          void handleDeleteVault();
         }}
       />
       <main className="stage">

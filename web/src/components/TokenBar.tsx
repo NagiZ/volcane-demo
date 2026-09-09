@@ -4,10 +4,12 @@ interface TokenBarProps {
   token: string;
   backendStatus: BackendStatus;
   rebuilding: boolean;
+  deletingVault: boolean;
   busy: boolean;
   notice: string | null;
   onTokenChange: (value: string) => void;
   onRebuild: () => void;
+  onDeleteVault: () => void;
 }
 
 const STATUS_LABEL: Record<BackendStatus, string> = {
@@ -20,10 +22,12 @@ export function TokenBar({
   token,
   backendStatus,
   rebuilding,
+  deletingVault,
   busy,
   notice,
   onTokenChange,
   onRebuild,
+  onDeleteVault,
 }: TokenBarProps) {
   return (
     <header className="token-bar">
@@ -55,9 +59,17 @@ export function TokenBar({
           type="button"
           className="btn btn--ghost"
           onClick={onRebuild}
-          disabled={busy || rebuilding || token.trim().length === 0}
+          disabled={busy || rebuilding || deletingVault || token.trim().length === 0}
         >
           {rebuilding ? '重建中…' : '重建会话'}
+        </button>
+        <button
+          type="button"
+          className="btn btn--ghost"
+          onClick={onDeleteVault}
+          disabled={busy || rebuilding || deletingVault || token.trim().length === 0}
+        >
+          {deletingVault ? '清理中…' : '清理 Vault'}
         </button>
       </div>
 

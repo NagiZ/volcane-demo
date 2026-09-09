@@ -58,6 +58,12 @@ export interface RebuildSessionResult {
   ok: true;
   tokenHash: string;
   sessionId: string;
+  vaultId?: string;
+}
+
+export interface DeleteVaultResult {
+  ok: true;
+  vaultId: string;
 }
 
 export interface SessionMessagesResult {
