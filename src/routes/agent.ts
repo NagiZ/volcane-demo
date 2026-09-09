@@ -115,6 +115,23 @@ export function createAgentRouter(deps: {
     }
   });
 
+  router.delete('/vault', async (req: Request, res: Response) => {
+    const tokenErr = requireNonEmptyString(req.body?.webUserToken, 'webUserToken');
+    if (tokenErr) return res.status(400).json({ error: tokenErr });
+
+    try {
+      const result = await deps.sessionService.deleteVaultForToken(req.body.webUserToken.trim());
+      return res.status(200).json({ ok: true, ...result });
+    } catch (err) {
+      if (err instanceof ArkApiError && err.code === 'NO_VAULT') {
+        return res.status(404).json({ error: err.message });
+      }
+      return res.status(503).json({
+        error: err instanceof Error ? err.message : 'Delete vault failed',
+      });
+    }
+  });
+
   router.post('/upload-file', (req: Request, res: Response, next) => {
     upload.single('file')(req, res, (err: unknown) => {
       if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
