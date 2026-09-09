@@ -99,6 +99,56 @@ describe('SessionService vault', () => {
       expect.objectContaining({ vaultId: 'vault-1' }),
     );
     expect(store.setSessionId).not.toHaveBeenCalled();
+    expect(store.setVaultId).not.toHaveBeenCalled();
+  });
+
+  it('rebuildSession deletes old vault then creates new session', async () => {
+    const store = makeStore({
+      getVaultId: vi.fn().mockResolvedValue('vault-old'),
+    });
+    const memoryService = {
+      getOrCreateUserMemoryStore: vi.fn().mockResolvedValue('memstore-42'),
+    } as unknown as MemoryService;
+    vi.mocked(deleteVault).mockResolvedValue(undefined);
+    vi.mocked(createEnvVault).mockResolvedValue({ vaultId: 'vault-new' });
+    vi.mocked(createArkSession).mockResolvedValue({ sessionId: 'sess-new' });
+
+    const svc = new SessionService(config, store, memoryService);
+    const result = await svc.rebuildSession('web-token');
+
+    expect(result).toMatchObject({ sessionId: 'sess-new', vaultId: 'vault-new' });
+    expect(deleteVault).toHaveBeenCalledWith(
+      expect.objectContaining({ vaultId: 'vault-old' }),
+    );
+    expect(store.deleteVaultId).toHaveBeenCalled();
+    expect(store.deleteSession).toHaveBeenCalled();
+    expect(createEnvVault).toHaveBeenCalled();
+    expect(createArkSession).toHaveBeenCalledWith(
+      expect.objectContaining({ vaultIds: ['vault-new'] }),
+    );
+    expect(store.setVaultId).toHaveBeenCalled();
+    expect(store.setSessionId).toHaveBeenCalled();
+  });
+
+  it('rebuildSession continues create path when deleteVault(old) rejects', async () => {
+    const store = makeStore({
+      getVaultId: vi.fn().mockResolvedValue('vault-old'),
+    });
+    const memoryService = {
+      getOrCreateUserMemoryStore: vi.fn().mockResolvedValue('memstore-42'),
+    } as unknown as MemoryService;
+    vi.mocked(deleteVault).mockRejectedValueOnce(new Error('delete-old-failed'));
+    vi.mocked(createEnvVault).mockResolvedValue({ vaultId: 'vault-new' });
+    vi.mocked(createArkSession).mockResolvedValue({ sessionId: 'sess-new' });
+
+    const svc = new SessionService(config, store, memoryService);
+    const result = await svc.rebuildSession('web-token');
+
+    expect(result).toMatchObject({ sessionId: 'sess-new', vaultId: 'vault-new' });
+    expect(store.deleteVaultId).toHaveBeenCalled();
+    expect(store.deleteSession).toHaveBeenCalled();
+    expect(createEnvVault).toHaveBeenCalled();
+    expect(createArkSession).toHaveBeenCalled();
   });
 
   it('deleteVaultForToken deletes upstream and vault map only', async () => {
@@ -115,5 +165,38 @@ describe('SessionService vault', () => {
     expect(deleteVault).toHaveBeenCalled();
     expect(store.deleteVaultId).toHaveBeenCalled();
     expect(store.deleteSession).not.toHaveBeenCalled();
+  });
+
+  it('deleteVaultForToken throws NO_VAULT 404 when no mapping', async () => {
+    const store = makeStore({
+      getVaultId: vi.fn().mockResolvedValue(null),
+    });
+    const memoryService = {} as MemoryService;
+
+    const svc = new SessionService(config, store, memoryService);
+    await expect(svc.deleteVaultForToken('web-token')).rejects.toMatchObject({
+      message: 'No vault mapping',
+      code: 'NO_VAULT',
+      status: 404,
+    });
+    expect(deleteVault).not.toHaveBeenCalled();
+    expect(store.deleteVaultId).not.toHaveBeenCalled();
+  });
+
+  it('deleteVaultForToken retains mapping when upstream deleteVault rejects', async () => {
+    const store = makeStore({
+      getVaultId: vi.fn().mockResolvedValue('vault-1'),
+    });
+    const memoryService = {} as MemoryService;
+    vi.mocked(deleteVault).mockRejectedValue(new Error('upstream-delete-failed'));
+
+    const svc = new SessionService(config, store, memoryService);
+    await expect(svc.deleteVaultForToken('web-token')).rejects.toThrow(
+      'upstream-delete-failed',
+    );
+    expect(deleteVault).toHaveBeenCalledWith(
+      expect.objectContaining({ vaultId: 'vault-1' }),
+    );
+    expect(store.deleteVaultId).not.toHaveBeenCalled();
   });
 });
