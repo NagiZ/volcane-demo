@@ -162,6 +162,38 @@
 
 ---
 
+## 三、选型建议（本项目结论）
+
+> 结论：**本项目优先选择火山方舟**。该结论不是“火山全面优于百炼”，而是基于本项目一期架构贴合度的客观判断；百炼在模型文档化、限流提额自助化、无阿里云栈依赖时的独立性上并不弱，但本项目一期要落地的三项能力恰好是火山的原生能力、百炼的待自建项。
+
+### 3.1 选型维度与权重
+| 维度 | 权重 | 说明 |
+|---|---|---|
+| 凭据注入与用户级鉴权 | 高 | 一期已确定「创建会话直接注入用户凭据」，直接影响 leyosys 取数落地形态 |
+| 长期记忆承载 | 中 | 用户偏好 + 历史文件索引，两平台实现成本差异明显 |
+| 报告 30 天归档 | 中 | 私有 TOS 挂载 vs Files+自有 OSS，涉及生命周期与自建量 |
+| 1000 会话在线扩容 | 中 | 席位扩资源池 vs 限流提额+排队 |
+| 计费 | 中 | 运行时一致，模型/工具/MCP 有差异 |
+| 生态与团队熟悉度 | 中 | 本项目无阿里云存量依赖，该维度对百炼的加分失效 |
+
+### 3.2 逐项对比结论
+| 维度 | 火山方舟 | 阿里云百炼 | 结论 |
+|---|---|---|---|
+| 凭据注入 | `environment_with_overrides` 会话级环境变量，Skill 直连 | 无会话级注入，取数须改 MCP/Node 回调 | **火山贴合一期架构** |
+| 长期记忆 | Memory Store 每用户一库 | Node 后端自建 Redis/DB | **火山减少自建成本** |
+| 报告归档 | 私有 TOS 直接挂载，生命周期自主 | Files 硬删除无归档，需转存 OSS | **火山链路更短** |
+| 并发扩容 | ArkClaw 席位扩资源池 | 限流提额 + 排队 | 1000 常驻会话多数 idle，二者均可，火山路径更清晰 |
+| 计费 | 运行时一致；自定义 Skill 免费 | 运行时一致；取数改 MCP 后新增 MCP 调用费 | **百炼潜在多一块 MCP 费** |
+| 生态 | 无阿里云存量依赖时无额外收益 | 无阿里云存量依赖，集成优势不成立 | 本项目无阿里云栈，百炼生态加分失效 |
+
+### 3.3 最终结论与前置条件
+1. **推荐火山方舟**：凭据注入、Memory Store、私有 TOS 三项原生能力直接覆盖本项目一期，避免百炼侧「取数改 MCP + 自建元数据存储 + 报告转 OSS」的额外改造。
+2. **火山二期的已知成本需纳入评估**：Vault 迁移要求把 leyosys 取数 Skill 改为 Python 直连（规避 Node 子进程读环境变量时占位符被脱敏、网关无法替换的问题），这是火山方案文档 3.4.2 明确标注的改造项，不是无成本能力。
+3. **选择不改变边界条件**：本项目「无阿里云存量依赖」这一前提若未来发生变化（例如 leyosys 迁阿里云、公司新增阿里云账号体系），应重新评估百炼的集成成本优势，选型结论需随前提更新而非固定不变。
+4. **上线前仍需 POC**：火山官方计费页的单位单价（运行时/工具调用）与 Vault PUT 运行期生效语义，均需以官方文档与验收用例为准，不能把本对比中的估算直接当作商务结论。
+
+---
+
 ## 参考文档
 - 火山方舟：[Managed Agents 概述](https://console.volcengine.com/ark/region:cn-beijing/docs/82379/2553713?lang=zh)、[Tools](https://ark.volcengine.com/region:cn-beijing/docs/82379/2553719?lang=zh)、[启动 Session](https://ark.volcengine.com/region:cn-beijing/docs/82379/2553723?lang=zh)、[使用 Vaults 认证](https://ark.volcengine.com/region:cn-beijing/docs/82379/2553726?lang=zh)、[查询凭证列表](https://console.volcengine.com/ark/region:cn-beijing/docs/82379/2555963?lang=zh)
 - 阿里云百炼：[Managed Agents API 总览与认证](https://help.aliyun.com/zh/model-studio/managed-agents-api-overview)、[会话事件流（SSE）](https://help.aliyun.com/zh/model-studio/managed-agents-event-stream)、[管理会话](https://help.aliyun.com/zh/model-studio/managed-agents-session-operations)、[文件上传与挂载](https://help.aliyun.com/zh/model-studio/managed-agents-file)、[文件 API](https://help.aliyun.com/zh/model-studio/files-api/)、[Managed Agents 计费说明](https://help.aliyun.com/zh/model-studio/managed-agents-billing)
