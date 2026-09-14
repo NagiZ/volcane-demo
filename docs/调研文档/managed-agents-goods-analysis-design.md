@@ -111,7 +111,7 @@ MA 平台层内部拆解：
 > 1. **约束**：同会话多 Skill 之间**不能直接跨沙箱共享本地文件**（各自执行环境的本地文件系统不互通），也不能编程互调，只能由 Agent 编排；
 > 2. **禁止**：把完整结果集放进工具返回值经模型上下文传递——10MB 量级（数百万 token）物理上无法过模型；
 > 3. **机制：会话共享目录 + 路径参数**：
->    1. 取数 Skill 把结果写入**会话共享目录**的约定路径（如 `/{shared_root}/{request_id}/raw_{接口标识}.{jsonl|xlsx}`，路径规范在 Skill 契约中固化，格式与分析 Skill 的读取契约对齐）
+>    1. 取数 Skill 把结果写入**会话共享目录**的约定路径（如 `/{shared_root}/{task_id}/raw_{接口标识}.{jsonl|xlsx}`，`task_id` 由取数 Skill 自行生成（如 uuid），路径规范在 Skill 契约中固化，格式与分析 Skill 的读取契约对齐）
 >    2. 取数 Skill 的返回值只放小载荷：**路径 + 行数/字段/字节数/摘要**
 >    3. Agent 取到该路径后，将其作为**显式入参**传给分析 Skill；**分析 Skill 必须定义路径入参（如 `data_path`）来接收并读文件**，不得自行扫目录或猜路径
 >    4. 分析 Skill 读文件后在其进程内完成诊断，只把结论返回给 Agent，数据不进模型上下文
@@ -249,7 +249,7 @@ MA 平台层内部拆解：
 
 ### 3.7 数据表结构设计（评审修订稿）
 > 设计口径：
-> 1. `agent_call_log` 的「一次调用」指**一轮完整分析任务**（一次用户消息触发到本轮回到 idle），不是单次模型/工具请求；否则 Token、时长、工具次数会碎片化，无法对齐计费与幂等。
+> 1. `agent_call_log` 的「一次调用」指**一轮完整分析任务**（一次用户消息触发到本轮回到 idle），不是单次模型/工具请求；否则 Token、时长、工具次数会碎片化，无法对齐计费口径。
 > 2. 审计表只存统计维度，不存消息正文、原始业务明细、规则内容。
 > 3. 用户偏好、权限标识仍放 Memory Store（读多写少、结构稳定）；**历史文件索引改由 DB 承载**（见 `agent_report_file`），避免 Memory Store 单条 JSON 膨胀与列表查询困难。
 > 4. 时间统一用 `DATETIME(3)` 保留毫秒，便于按运行时长与断点续传对账。
@@ -261,12 +261,12 @@ MA 平台层内部拆解：
 | platform_status / stop_reason | `session.status_*` 事件（idle / running / terminated + stop_reason） | ✅ 直接返回 | 4.2 已确认 |
 | agent_id / agent_version | 创建会话时使用的 Agent 及快照 | ✅ 创建时业务侧已知；`agent_version` 是否由平台返回需 POC | 无版本返回时由业务侧自维护 |
 | tool_call_count | 事件流中的 `tool_use` / `agent.custom_tool_use` 逐次计数 | ⚠️ 由事件计数 | 需 POC 确认火山逐次下发工具调用事件 |
-| input_tokens / output_tokens / cache_read_tokens / cache_creation_tokens | 火山返回的 usage（事件/接口） | ✅ 直接返回 | 平台字段：`input_tokens`、`output_tokens`、`cache_read_input_tokens`、`cache_creation_input_tokens`；落库映射见 3.7.3 |
+| input_tokens / output_tokens / cache_read_tokens / cache_creation_tokens | 火山返回的 usage（事件/接口） | ✅ 直接返回 | 平台字段：`input_tokens`、`output_tokens`、`cache_read_input_tokens`、`cache_creation_input_tokens`；落库映射见 3.7.3。注意：usage 随一轮内的**每次模型请求**（`span.model_request_end`，一轮因工具往返可有 N 次）分别返回，**Node 需在本轮内累加后只落一行汇总值**；该事件携带的平台 request_id 为单次模型请求粒度，**不落库**，仅在需与火山账单逐笔核对时回查事件流 |
 | running_duration_ms | 后端观察 running → idle 自行计时 | ❌ 平台不直接给单次时长 | 由 started_at / ended_at 计算，可靠 |
 | cost | 后端按官方单价回算 | ❌ 平台不直接给单次费用 | 由 token / 时长 / 工具次数计算，不得采信模型返回值 |
 | model | 业务侧创建 Agent 时指定，或事件返回 | ✅ 业务侧已知 | 若会话可覆写模型，需记录覆写后的值 |
 | error_code / error_msg | `error` 事件（后端归一化） | ⚠️ 事件归一化 | 4.2 已注明 error 为归一化事件，非方舟原生事件名 |
-| report_file_id / oss_path | `GET /files?scope_id={sessionId}` + 私有 TOS 归档 | ✅ 平台返回文件，路径业务侧定 | 4.2 已确认产物文件通过该接口轮询获取 |
+| oss_path / 文件归属 | `GET /files?scope_id={sessionId}` + 私有 TOS 归档 | ✅ 平台返回文件，路径业务侧定 | 4.2 已确认产物文件通过该接口轮询获取；归属本轮的 `agent_call_log.id`（发送→idle 时间窗登记，见 3.7.4） |
 
 #### 3.7.1 business_user_agent_binding（业务用户-平台资源绑定，用户级）
 对应 3.4.3 原 `user_agent_bind` 的落表，解决「创建会话前需知道挂哪个 Memory Store」的引导问题。
@@ -305,8 +305,7 @@ MA 平台层内部拆解：
 #### 3.7.3 agent_call_log（调用审计，一次分析任务一行）
 | 字段 | 类型 | 说明 | 必填 |
 |---|---|---|---|
-| id | BIGINT | 自增主键 | 是 |
-| request_id | VARCHAR(64) | 业务请求幂等 ID（唯一） | 是 |
+| id | BIGINT | 自增主键（一轮任务一个，作为审计与文件关联的唯一标识） | 是 |
 | user_id | VARCHAR(64) | 业务用户 ID | 是 |
 | session_id | VARCHAR(128) | 火山 Session ID | 是 |
 | agent_id | VARCHAR(128) | Agent 实例 ID | 否 |
@@ -322,19 +321,18 @@ MA 平台层内部拆解：
 | tool_call_count | INT | 内置工具调用次数 | 否 |
 | running_duration_ms | INT | 运行时长（毫秒） | 否 |
 | cost | DECIMAL(12,6) | 折算费用（后算，可空） | 否 |
-| report_file_id | BIGINT | 关联 agent_report_file.id | 否 |
 | started_at | DATETIME(3) | 开始时间 | 是 |
 | ended_at | DATETIME(3) | 结束时间 | 否 |
 
-约束/索引：`UNIQUE(request_id)`；`INDEX(user_id, started_at)`；`INDEX(session_id)`。火山计费为「Token + 运行时长 + 工具调用次数」三段，因此按火山 usage 拆分输入/输出/缓存命中/缓存创建四类 Token，并记录 `running_duration_ms`、`tool_call_count`，才能按官方单价回算 `cost`。`total_tokens` 按 `input_tokens + output_tokens + cache_read_tokens` 汇总；`cache_creation_tokens` 为缓存存储计费口径，最终计费以火山账单为准。`cost` 由后端统一计算，不直接采信模型/前端返回值。
+约束/索引：主键 `id` 自增；`INDEX(user_id, started_at)`；`INDEX(session_id)`。Node 不做请求去重——用户每发送一条消息均由 Agent 完整执行并落一行记录，重复提交由 3.2.1 的同会话并发限制（排队或拒绝）兜底，不引入业务幂等键。火山计费为「Token + 运行时长 + 工具调用次数」三段，因此按火山 usage 拆分输入/输出/缓存命中/缓存创建四类 Token，并记录 `running_duration_ms`、`tool_call_count`，才能按官方单价回算 `cost`。`total_tokens` 按 `input_tokens + output_tokens + cache_read_tokens` 汇总；`cache_creation_tokens` 为缓存存储计费口径，最终计费以火山账单为准。`cost` 由后端统一计算，不直接采信模型/前端返回值。
 
 #### 3.7.4 agent_report_file（报告文件索引，30 天生命周期）
 | 字段 | 类型 | 说明 | 必填 |
 |---|---|---|---|
 | id | BIGINT | 自增主键 | 是 |
+| call_log_id | BIGINT | 关联 `agent_call_log.id`（本轮任务） | 是 |
 | user_id | VARCHAR(64) | 业务用户 ID | 是 |
 | session_id | VARCHAR(128) | 火山 Session ID | 是 |
-| request_id | VARCHAR(64) | 关联调用 request_id | 否 |
 | file_type | VARCHAR(16) | 文件类型（md/xlsx） | 否 |
 | file_name | VARCHAR(255) | 文件名 | 否 |
 | oss_path | VARCHAR(512) | 私有 TOS 归档路径 | 是 |
@@ -343,7 +341,7 @@ MA 平台层内部拆解：
 | expire_at | DATETIME(3) | 到期时间（30 天） | 是 |
 | created_at | DATETIME(3) | 创建时间 | 是 |
 
-约束/索引：`INDEX(user_id, created_at)`；`INDEX(expire_at)`（清理任务用）；`INDEX(session_id)`。该表替换 3.3 中「历史文件索引放 Memory Store 单条 JSON」的写法，DB 作为文件索引真源，支持列表/分页/生命周期清理。
+约束/索引：`INDEX(call_log_id)`；`INDEX(user_id, created_at)`；`INDEX(expire_at)`（清理任务用）；`INDEX(session_id)`。该表替换 3.3 中「历史文件索引放 Memory Store 单条 JSON」的写法，DB 作为文件索引真源，支持列表/分页/生命周期清理。文件登记方式：Node 在发送消息时先插入 `agent_call_log` 行取得自增 `id`，本轮 `session.status_idle` 后通过 `GET /files?scope_id={sessionId}` 轮询到产物文件（同一 Session 不支持并发，发送→idle 时间窗内的新文件即归属本轮），归档 TOS 后以该 `id` 回填 `call_log_id`；一轮可登记多个文件（md/xlsx）。
 
 #### 3.7.5 建表 SQL（MySQL 8，参考）
 ```sql
@@ -378,7 +376,6 @@ CREATE TABLE business_agent_session (
 
 CREATE TABLE agent_call_log (
   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  request_id VARCHAR(64) NOT NULL,
   user_id VARCHAR(64) NOT NULL,
   session_id VARCHAR(128) NOT NULL,
   agent_id VARCHAR(128) NULL,
@@ -394,19 +391,17 @@ CREATE TABLE agent_call_log (
   tool_call_count INT NULL,
   running_duration_ms INT NULL,
   cost DECIMAL(12,6) NULL,
-  report_file_id BIGINT UNSIGNED NULL,
   started_at DATETIME(3) NOT NULL,
   ended_at DATETIME(3) NULL,
-  UNIQUE KEY uk_request (request_id),
   KEY idx_user_time (user_id, started_at),
   KEY idx_session (session_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE agent_report_file (
   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  call_log_id BIGINT UNSIGNED NOT NULL,
   user_id VARCHAR(64) NOT NULL,
   session_id VARCHAR(128) NOT NULL,
-  request_id VARCHAR(64) NULL,
   file_type VARCHAR(16) NULL,
   file_name VARCHAR(255) NULL,
   oss_path VARCHAR(512) NOT NULL,
@@ -414,6 +409,7 @@ CREATE TABLE agent_report_file (
   status TINYINT NOT NULL DEFAULT 0,
   expire_at DATETIME(3) NOT NULL,
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  KEY idx_call_log (call_log_id),
   KEY idx_user_time (user_id, created_at),
   KEY idx_expire (expire_at),
   KEY idx_session (session_id)
@@ -462,9 +458,9 @@ CREATE TABLE agent_report_file (
 | 模型调用失败 | 限流、服务异常 | 重试 1 次，仍失败则返回友好提示，记录告警 |
 | 文件归档失败 | TOS 写入异常、权限不足 | 先写入沙箱本地临时目录，后台重试归档；同步记录告警 |
 
-### 5.2 重试与幂等
+### 5.2 重试与重复提交
 - **重试策略**：取数接口指数退避重试 3 次；规则加载重试 2 次；模型调用失败重试 1 次
-- **幂等设计**：分析任务携带唯一 `request_id`，重复调用不重复生成文件、不重复计费
+- **重复提交**：Node 不做请求去重，用户每发送一条消息都由 Agent 完整执行；`agent_call_log` 以自增 `id` 按轮记账，不设业务幂等键。同会话并发由 3.2.1 限制（排队或拒绝），避免平台侧并发报错；SSE 断连重连只续传事件，不产生新任务行
 - **断点续传**：SSE 事件流支持 `Last-Event-ID`，断连重连后从断点继续，不重复推送
 
 ---
