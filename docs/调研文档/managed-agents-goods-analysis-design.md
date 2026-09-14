@@ -1,6 +1,7 @@
 # 火山引擎 Managed Agents 商品异常分析Agent 技术方案
-> **版本**：V1.1（评审修订稿）
+> **版本**：V1.2（评审修订稿）
 > **更新说明**：V1.1 修订：① 一期鉴权改用会话环境变量注入，Vault 调整为二期进阶方案（需同步改造 leyosys/Skill）；② Memory Store 改为每用户独立单库，全局规则改由业务侧配置源实时拉取；③ 修正 SSE 事件语义（custom_tool 前缀、requires_action、file/error 事件），补充单会话并发限制与成本假设出处。仍保留：leyosys 用户级鉴权、规则全量热更新不中断会话、报告法定留存 30 天、单次单用户数据≤10MB、约 1000 名内部用户。
+> **V1.2 修订**：新增 3.7 数据表结构设计（`business_user_agent_binding` / `business_agent_session` / `agent_call_log` / `agent_report_file` 四张表）；历史分析文件索引由 Memory Store 迁至 `agent_report_file` 表，Memory Store 仅保留用户偏好与权限标识。
 > **方案边界**：本方案仅覆盖火山引擎 Managed Agents 平台侧的对接设计、Agent 配置、Skill 集成、资源管理、会话与事件处理，不包含 leyosys 业务系统本身、业务规则引擎的后端开发与运维。
 
 ---
@@ -49,7 +50,7 @@
 MA 平台层内部拆解：
 - **Agent 调度层**：大模型推理、指令解析、多 Skill 编排调度、结果整合
 - **Skill 执行层**：leyosys 取数 Skill、规则执行引擎 Skill、内置文件生成能力
-- **基础资源层**：沙箱运行环境、Memory Store（每用户独立库：用户配置+文件索引）、私有 TOS 归档存储；Vault（用户级凭据库）为二期进阶项
+- **基础资源层**：沙箱运行环境、Memory Store（每用户独立库：用户配置+权限标识）、私有 TOS 归档存储；Vault（用户级凭据库）为二期进阶项
 
 ### 2.2 核心 Skill 分工与职责边界
 | Skill 名称 | 形态 | 职责 | 输入 | 输出 |
@@ -68,7 +69,7 @@ MA 平台层内部拆解：
 5.  调度规则执行引擎 Skill，从业务侧规则配置源拉取全量最新业务规则（内存处理），执行异常诊断
 6.  Agent 整合诊断结论，生成自然语言文字回复
 7.  如需生成报告，调用文件生成能力，输出结构化文件至私有 TOS 归档目录
-8.  Node 后端异步更新对应用户的 Memory Store：历史分析索引、用户偏好
+8.  Node 后端异步更新用户偏好至 Memory Store，并将历史分析文件写入 `agent_report_file` 表
 9.  所有中间事件与最终结果通过 SSE 事件流推送至前端
 10. 任务结束，会话进入 idle 状态，沙箱停止计费；原始数据随沙箱内存释放，不持久化留存
 
@@ -131,25 +132,25 @@ MA 平台层内部拆解：
 | 存储项 | 说明 | 更新方 |
 |---|---|---|
 | 用户分析偏好 | 常用分析维度、默认时间范围、输出格式偏好、默认品类权限 | Node 后端 |
-| 历史分析文件索引 | 每次分析的任务 ID、时间、摘要、对应文件 TOS 路径、文件大小（合并为单条 JSON） | Node 后端 |
+| 历史分析文件索引 | 已迁至 `agent_report_file` 表（见 3.7.4），Memory Store 不再承载文件索引 | Node 后端 |
 | 用户权限标识 | 可访问的商品品类、数据范围权限标记 | Node 后端 |
 
 > **不存储**：原始业务明细数据、完整异常清单、规则执行引擎代码、全局业务规则（规则由业务侧配置源承载，见 3.1.2）
 
 #### 3.3.2 读写策略
-- **读权限**：沙箱以 `read_only` 模式挂载对应用户的 Memory Store，Skill 运行时仅读取用户配置与索引
+- **读权限**：沙箱以 `read_only` 模式挂载对应用户的 Memory Store，Skill 运行时仅读取用户配置与权限标识
 - **写权限**：统一由 Node 后端通过 Memory Store API 执行写入/更新，Skill 不具备写权限，避免数据篡改
 - **更新时机**：用户配置变更、完成新的分析任务时，由后端异步更新对应用户的库
 
 #### 3.3.3 容量与生命周期
 - **方案选择**：**每用户一个独立 Memory Store**（1000 用户对应约 1000 个库），会话创建时以 `resources[]` 挂载对应用户库
 - **容量规划**：
-  - 单用户库条目数：3~5 条（用户偏好、文件索引、权限标识等），单条 ≤100KB，远低于单库 2000 条上限
-  - 文件索引合并为每用户 1 条 JSON（数组内追加），避免"每次分析 1 条"导致条数失控
+  - 单用户库条目数：2~3 条（用户偏好、权限标识等），单条 ≤100KB，远低于单库 2000 条上限
+  - 文件索引不再占用 Memory Store 空间（由 `agent_report_file` 表承载）
   - 全局规则不占 Memory Store 空间（由业务侧配置源承载）
 - **生命周期**：
   - 用户级数据：随用户账号生命周期，离职/失效用户同步清理
-  - 文件索引：与 TOS 归档文件生命周期同步（30天），到期同步清理
+  - 文件索引：已迁至 `agent_report_file` 表，与 TOS 归档文件生命周期同步（30 天），到期同步清理（见 3.7.6）
   - 规则数据：生命周期由业务侧配置源管理（保留最近 3 版），与本库解耦
 
 ### 3.4 凭据管理设计（一期：会话环境变量；二期：Vault 进阶）
@@ -167,8 +168,9 @@ MA 平台层内部拆解：
 - **隔离性**：不同用户 Vault 完全独立，会话之间凭据不互通
 
 #### 3.4.3 资源绑定关系
-通过业务映射表 `user_agent_bind` 统一维护：
-`biz_user_id ↔ memory_store_id ↔ default_session_id`（二期接入 Vault 后追加 `vault_id`）
+通过两张表维护（详见 3.7）：
+- `business_user_agent_binding`：`biz_user_id ↔ memory_store_id`（二期追加 `vault_id`）
+- `business_agent_session`：`biz_user_id ↔ platform_session_id`，默认会话以 `is_default=1` 标识
 
 ### 3.5 文件30天归档存储设计
 #### 3.5.1 存储方案选型
@@ -180,12 +182,12 @@ MA 平台层内部拆解：
 #### 3.5.2 目录与命名规范
 - 按用户分目录：`/archive/{biz_user_id}/year/month/`
 - 文件命名：`{分析类型}_{商品范围}_{时间}_{任务ID}.xlsx/md`
-- 索引关联：文件生成后，将路径、大小、时间写入 Memory Store 历史分析索引，支持前端查询与下载
+- 索引关联：文件生成后，将路径、大小、时间写入 `agent_report_file` 表，支持前端查询与下载
 
 #### 3.5.3 生命周期与成本
 - 存储单价：**0.0015 元/GB/小时**（约 1.08 元/GB/月）
 - 保留策略：报告文件自生成之日起**标准存储30天**，到期自动删除
-- 索引同步：文件到期删除时，同步清理 Memory Store 中对应的历史分析索引
+- 索引同步：文件到期删除时，同步更新 `agent_report_file.status=1`
 - 容量测算：单份报告约 200KB，1000 用户日均 1 份，30天留存总量约 6GB
 
 ### 3.6 规则内聚与功能解耦设计
@@ -226,13 +228,187 @@ MA 平台层内部拆解：
 1. **一期（快速上线）**：逻辑暂内聚于单一分析 Skill，最小开发量跑通全链路。
 2. **二期（功能解耦）**：拆分基础能力工具，职责清晰，独立迭代复用。
 3. **三期（动态优化）**：高频规则抽离至 Memory Store 加密存储，支持热更新。
+
+### 3.7 数据表结构设计（评审修订稿）
+> 设计口径：
+> 1. `agent_call_log` 的「一次调用」指**一轮完整分析任务**（一次用户消息触发到本轮回到 idle），不是单次模型/工具请求；否则 Token、时长、工具次数会碎片化，无法对齐计费与幂等。
+> 2. 审计表只存统计维度，不存消息正文、原始业务明细、规则内容。
+> 3. 用户偏好、权限标识仍放 Memory Store（读多写少、结构稳定）；**历史文件索引改由 DB 承载**（见 `agent_report_file`），避免 Memory Store 单条 JSON 膨胀与列表查询困难。
+> 4. 时间统一用 `DATETIME(3)` 保留毫秒，便于按运行时长与断点续传对账。
+
+#### 3.7.0 字段数据来源核对（依赖火山返回的字段）
+| 字段 | 数据来源 | 火山是否直接提供 | 说明 |
+|---|---|---|---|
+| platform_session_id | `POST /sessions` 返回的 `id` | ✅ 直接返回 | 4.1 已确认 |
+| platform_status / stop_reason | `session.status_*` 事件（idle / running / terminated + stop_reason） | ✅ 直接返回 | 4.2 已确认 |
+| agent_id / agent_version | 创建会话时使用的 Agent 及快照 | ✅ 创建时业务侧已知；`agent_version` 是否由平台返回需 POC | 无版本返回时由业务侧自维护 |
+| tool_call_count | 事件流中的 `tool_use` / `agent.custom_tool_use` 逐次计数 | ⚠️ 由事件计数 | 需 POC 确认火山逐次下发工具调用事件 |
+| input_tokens / output_tokens / cache_read_tokens | 若 SSE 事件含 usage 则直取；否则从火山用量/账单 API 回填 | ⚠️ **待 POC** | **上线前必验：事件流是否返回 usage**；未确认前三列保持可空，事后回填 |
+| running_duration_ms | 后端观察 running → idle 自行计时 | ❌ 平台不直接给单次时长 | 由 started_at / ended_at 计算，可靠 |
+| cost | 后端按官方单价回算 | ❌ 平台不直接给单次费用 | 由 token / 时长 / 工具次数计算，不得采信模型返回值 |
+| model | 业务侧创建 Agent 时指定，或事件返回 | ✅ 业务侧已知 | 若会话可覆写模型，需记录覆写后的值 |
+| error_code / error_msg | `error` 事件（后端归一化） | ⚠️ 事件归一化 | 4.2 已注明 error 为归一化事件，非方舟原生事件名 |
+| report_file_id / oss_path | `GET /files?scope_id={sessionId}` + 私有 TOS 归档 | ✅ 平台返回文件，路径业务侧定 | 4.2 已确认产物文件通过该接口轮询获取 |
+
+#### 3.7.1 business_user_agent_binding（业务用户-平台资源绑定，用户级）
+对应 3.4.3 原 `user_agent_bind` 的落表，解决「创建会话前需知道挂哪个 Memory Store」的引导问题。
+
+| 字段 | 类型 | 说明 | 必填 |
+|---|---|---|---|
+| id | BIGINT | 自增主键 | 是 |
+| user_id | VARCHAR(64) | 业务用户 ID（唯一） | 是 |
+| memory_store_id | VARCHAR(128) | 火山 Memory Store ID（每用户一库） | 是 |
+| vault_id | VARCHAR(128) | 火山 Vault ID（二期接入后使用） | 否 |
+| status | TINYINT | 0 正常 / 1 停用 | 是 |
+| created_at | DATETIME(3) | 创建时间 | 是 |
+| updated_at | DATETIME(3) | 更新时间 | 是 |
+
+约束/索引：`UNIQUE(user_id)`。默认会话不落这张表，由 `business_agent_session.is_default=1` 判定，避免双写不一致。
+
+#### 3.7.2 business_agent_session（业务会话映射，会话级）
+| 字段 | 类型 | 说明 | 必填 |
+|---|---|---|---|
+| id | BIGINT | 自增主键 | 是 |
+| user_id | VARCHAR(64) | 业务用户 ID | 是 |
+| platform_session_id | VARCHAR(128) | 火山 Session ID（唯一） | 是 |
+| agent_id | VARCHAR(128) | 创建会话时的 Agent 实例 ID | 否 |
+| agent_version | VARCHAR(32) | 会话快照的 Agent 版本号 | 否 |
+| is_default | TINYINT | 1 默认会话 / 0 临时会话 | 是 |
+| platform_status | VARCHAR(32) | 火山状态：idle / running / terminated | 是 |
+| biz_status | TINYINT | 0 活跃 / 1 已结束（terminated 时置 1） | 是 |
+| title | VARCHAR(255) | 会话标题/摘要 | 否 |
+| credential_version | VARCHAR(64) | 本次注入的用户凭据版本（轮换重建用） | 否 |
+| created_at | DATETIME(3) | 创建时间 | 是 |
+| last_active_at | DATETIME(3) | 最后活跃时间 | 是 |
+| terminated_at | DATETIME(3) | 终止时间 | 否 |
+
+约束/索引：`UNIQUE(platform_session_id)`；`INDEX(user_id)`；「每用户唯一默认会话」由应用层保证 `is_default=1` 唯一。保留 `platform_status` 与 `biz_status` 两层：平台状态用于对接事件流，业务状态用于前端展示与清理；`credential_version` 用于识别凭据轮换前的旧会话。
+
+#### 3.7.3 agent_call_log（调用审计，一次分析任务一行）
+| 字段 | 类型 | 说明 | 必填 |
+|---|---|---|---|
+| id | BIGINT | 自增主键 | 是 |
+| request_id | VARCHAR(64) | 业务请求幂等 ID（唯一） | 是 |
+| user_id | VARCHAR(64) | 业务用户 ID | 是 |
+| session_id | VARCHAR(128) | 火山 Session ID | 是 |
+| agent_id | VARCHAR(128) | Agent 实例 ID | 否 |
+| model | VARCHAR(64) | 模型标识（如 doubao-seed-2.1-turbo） | 否 |
+| status | TINYINT | 0 成功 / 1 失败 | 是 |
+| error_code | VARCHAR(64) | 错误码 | 否 |
+| error_msg | VARCHAR(512) | 错误信息 | 否 |
+| input_tokens | INT | 输入 Token | 否 |
+| output_tokens | INT | 输出 Token | 否 |
+| cache_read_tokens | INT | 缓存命中读取 Token | 否 |
+| tool_call_count | INT | 内置工具调用次数 | 否 |
+| running_duration_ms | INT | 运行时长（毫秒） | 否 |
+| cost | DECIMAL(12,6) | 折算费用（后算，可空） | 否 |
+| report_file_id | BIGINT | 关联 agent_report_file.id | 否 |
+| started_at | DATETIME(3) | 开始时间 | 是 |
+| ended_at | DATETIME(3) | 结束时间 | 否 |
+
+约束/索引：`UNIQUE(request_id)`；`INDEX(user_id, started_at)`；`INDEX(session_id)`。火山计费为「Token + 运行时长 + 工具调用次数」三段，因此把 Token 拆输入/输出/缓存命中，并记录 `running_duration_ms`、`tool_call_count`，才能按官方单价回算 `cost`；`cost` 由后端统一计算，不直接采信模型/前端返回值。
+
+#### 3.7.4 agent_report_file（报告文件索引，30 天生命周期）
+| 字段 | 类型 | 说明 | 必填 |
+|---|---|---|---|
+| id | BIGINT | 自增主键 | 是 |
+| user_id | VARCHAR(64) | 业务用户 ID | 是 |
+| session_id | VARCHAR(128) | 火山 Session ID | 是 |
+| request_id | VARCHAR(64) | 关联调用 request_id | 否 |
+| file_type | VARCHAR(16) | 文件类型（md/xlsx） | 否 |
+| file_name | VARCHAR(255) | 文件名 | 否 |
+| oss_path | VARCHAR(512) | 私有 TOS 归档路径 | 是 |
+| file_size | INT | 文件字节数 | 否 |
+| status | TINYINT | 0 有效 / 1 已过期删除 | 是 |
+| expire_at | DATETIME(3) | 到期时间（30 天） | 是 |
+| created_at | DATETIME(3) | 创建时间 | 是 |
+
+约束/索引：`INDEX(user_id, created_at)`；`INDEX(expire_at)`（清理任务用）；`INDEX(session_id)`。该表替换 3.3 中「历史文件索引放 Memory Store 单条 JSON」的写法，DB 作为文件索引真源，支持列表/分页/生命周期清理。
+
+#### 3.7.5 建表 SQL（MySQL 8，参考）
+```sql
+CREATE TABLE business_user_agent_binding (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  user_id VARCHAR(64) NOT NULL,
+  memory_store_id VARCHAR(128) NOT NULL,
+  vault_id VARCHAR(128) NULL,
+  status TINYINT NOT NULL DEFAULT 0,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  UNIQUE KEY uk_user (user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE business_agent_session (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  user_id VARCHAR(64) NOT NULL,
+  platform_session_id VARCHAR(128) NOT NULL,
+  agent_id VARCHAR(128) NULL,
+  agent_version VARCHAR(32) NULL,
+  is_default TINYINT NOT NULL DEFAULT 0,
+  platform_status VARCHAR(32) NOT NULL DEFAULT 'idle',
+  biz_status TINYINT NOT NULL DEFAULT 0,
+  title VARCHAR(255) NULL,
+  credential_version VARCHAR(64) NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  last_active_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  terminated_at DATETIME(3) NULL,
+  UNIQUE KEY uk_platform_session (platform_session_id),
+  KEY idx_user (user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE agent_call_log (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  request_id VARCHAR(64) NOT NULL,
+  user_id VARCHAR(64) NOT NULL,
+  session_id VARCHAR(128) NOT NULL,
+  agent_id VARCHAR(128) NULL,
+  model VARCHAR(64) NULL,
+  status TINYINT NOT NULL DEFAULT 0,
+  error_code VARCHAR(64) NULL,
+  error_msg VARCHAR(512) NULL,
+  input_tokens INT NULL,
+  output_tokens INT NULL,
+  cache_read_tokens INT NULL,
+  tool_call_count INT NULL,
+  running_duration_ms INT NULL,
+  cost DECIMAL(12,6) NULL,
+  report_file_id BIGINT UNSIGNED NULL,
+  started_at DATETIME(3) NOT NULL,
+  ended_at DATETIME(3) NULL,
+  UNIQUE KEY uk_request (request_id),
+  KEY idx_user_time (user_id, started_at),
+  KEY idx_session (session_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE agent_report_file (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  user_id VARCHAR(64) NOT NULL,
+  session_id VARCHAR(128) NOT NULL,
+  request_id VARCHAR(64) NULL,
+  file_type VARCHAR(16) NULL,
+  file_name VARCHAR(255) NULL,
+  oss_path VARCHAR(512) NOT NULL,
+  file_size INT NULL,
+  status TINYINT NOT NULL DEFAULT 0,
+  expire_at DATETIME(3) NOT NULL,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  KEY idx_user_time (user_id, created_at),
+  KEY idx_expire (expire_at),
+  KEY idx_session (session_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+```
+
+#### 3.7.6 生命周期与清理
+- 会话：`business_agent_session.last_active_at` 超过阈值（结合平台 30 天沙箱回收）置 `biz_status=1` 或归档；用户离职同步清理。
+- 审计：`agent_call_log` 按月分区/归档，保留周期与财务对账要求一致（建议 ≥90 天，待确认）。
+- 文件：定时任务按 `agent_report_file.expire_at` 清理私有 TOS 对象并置 `status=1`，与 30 天生命周期一致。
 ---
 
 ## 四、接口与事件规范
 ### 4.1 平台侧核心 API 清单（Node 后端调用）
 | 类别 | 接口 | 用途 |
 |---|---|---|
-| 资源管理 | 创建 Memory Store、写入/删除记忆条目 | 用户配置、文件索引管理（每用户一库） |
+| 资源管理 | 创建 Memory Store、写入/删除记忆条目 | 用户配置、权限标识管理（每用户一库） |
 | 会话管理 | 创建 Session | 挂载用户 Memory Store、私有 TOS，注入用户凭据环境变量 |
 | 会话管理 | 发送用户事件 | 提交分析指令、中断任务 |
 | 事件流 | SSE Stream 接口 | 监听消息、Skill 调用、状态、文件等事件 |
@@ -280,7 +456,7 @@ MA 平台层内部拆解：
 
 ### 6.2 数据安全
 - 业务原始数据仅在沙箱内存中处理，不持久化到本地存储，任务结束即释放
-- Memory Store 仅存用户配置与文件索引，不存储原始业务明细数据与规则数据
+- Memory Store 仅存用户配置与权限标识，不存储原始业务明细数据与规则数据；文件索引由 `agent_report_file` 表承载
 - 私有 TOS 归档文件支持服务端加密，访问权限受控，30天自动清理
 - 不同用户会话、沙箱、资源完全隔离，数据不互通
 
