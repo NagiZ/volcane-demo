@@ -187,8 +187,8 @@ MA 平台层内部拆解：
 
 #### 3.4.3 资源绑定关系
 通过两张表维护（详见 3.7）：
-- `business_user_agent_binding`：`biz_user_id ↔ memory_store_id`（二期追加 `vault_id`）
-- `business_agent_session`：`biz_user_id ↔ platform_session_id`，默认会话以 `is_default=1` 标识
+- `business_user_agent_binding`：`user_id ↔ memory_store_id`（二期追加 `vault_id`）
+- `business_agent_session`：`user_id ↔ platform_session_id`，默认会话以 `is_default=1` 标识
 
 ### 3.5 文件30天归档存储设计
 #### 3.5.1 存储方案选型
@@ -197,8 +197,10 @@ MA 平台层内部拆解：
 - 写入方式：Skill 生成报告文件直接写入 TOS 挂载目录，自动持久化到对象存储
 - 优势：文件生命周期自主可控，不受平台 7 天自动删除限制；支持30天保留策略、访问权限管控
 
+> **是否必须挂私有 TOS（待确认，见 10.1 P0-1）**：本方案的唯一刚性理由是「文件需留存 30 天、可历史下载」，而平台默认产物存储 7 天自动删除、沙箱文件随沙箱回收。30 天的原始依据是**分析报告法定留存**，但一期产物是**取数结果文件**而非分析报告。若合规确认取数文件不适用 30 天留存、业务也不要求长期回溯，则一期直接用平台默认文件链路（Skill 写 `/mnt/session/outputs`，`GET /files` 带 `purpose=agent` 获取，见 4.2，存储期 7 天），取消桶挂载、TOS 归档与清理任务，`agent_report_file` 仅登记平台 file_id；若仍需 30 天，则保留本方案，但需补验挂载 TOS 目录是否同样注册到 Files API（若否则 Node 直接列举桶对象获取 `oss_path`）。
+
 #### 3.5.2 目录与命名规范
-- 按用户分目录：`/archive/{biz_user_id}/year/month/`
+- 按用户分目录：`/archive/{user_id}/year/month/`
 - 文件命名：`{分析类型}_{商品范围}_{时间}_{任务ID}.xlsx/md`
 - 索引关联：文件生成后，将路径、大小、时间写入 `agent_report_file` 表，支持前端查询与下载
 
@@ -240,7 +242,7 @@ MA 平台层内部拆解：
 采用「模型自主调度 + 后端边界约束 + Skill 入口校验」三层机制，既保留 Agent 原生编排能力，又确保分析类任务 100% 触发工具。
 1. **后端动态边界约束**：所有工具提前注入 Agent 自定义工具列表，由 Agent 自主识别意图、选择工具。后端仅做粗粒度意图分类，通过 `tool_choice` 参数划定边界：分析类请求设为 `required`（强制调用工具，禁止直接回答）；非分析类请求设为 `auto`（模型自主）。
 2. **Skill 入口合法性校验**：所有业务工具入口做参数与权限校验，校验不通过返回标准化错误，禁止跳过执行。
-3. **后端事件流兜底校验**：SSE 层校验分析类请求的工具调用记录，缺失则自动重发并强制调用工具，架构级兜底。
+3. **后端事件流观测兜底**：SSE 层观测本轮工具调用事件（平台成对稳定下发，见 3.7.0）；若分析类请求至 idle 仍无工具调用记录，**不自动重发消息**（Node 不去重、不替用户重入，重复执行由 Agent 侧承担，见 5.2），仅记录异常并提示用户重试，避免重复取数、重复计费与重复产物。
 
 #### 3.6.5 分阶段落地
 1. **一期（快速上线）**：只建取数链路——leyosys 取数 Skill（已就绪）+ 结果对话/文件交付 + 会话/凭据/Memory Store/TOS 对接，最小开发量跑通全链路。
@@ -259,14 +261,14 @@ MA 平台层内部拆解：
 |---|---|---|---|
 | platform_session_id | `POST /sessions` 返回的 `id` | ✅ 直接返回 | 4.1 已确认 |
 | platform_status / stop_reason | `session.status_*` 事件（idle / running / terminated + stop_reason） | ✅ 直接返回 | 4.2 已确认 |
-| agent_id / agent_version | 创建会话时使用的 Agent 及快照 | ✅ 创建时业务侧已知；`agent_version` 是否由平台返回需 POC | 无版本返回时由业务侧自维护 |
-| tool_call_count | 事件流中的 `tool_use` / `agent.custom_tool_use` 逐次计数 | ⚠️ 由事件计数 | 需 POC 确认火山逐次下发工具调用事件 |
+| agent_id / agent_version | 创建、查询会话返回 | ✅ 直接返回（已确认） | 会话创建时确定，**创建后全程不变**，直接落 `business_agent_session.agent_version` |
+| tool_call_count | 事件流中的工具调用事件（`agent.tool_use` / `agent.mcp_tool_use` / `agent.custom_tool_use`） | ✅ 直接返回（已确认） | 平台**逐次、稳定、成对下发**，每次工具调用有明确事件与唯一 ID，不丢失、不合并；Node 按本轮事件对计数，只落本轮汇总数，不存工具明细 |
 | input_tokens / output_tokens / cache_read_tokens / cache_creation_tokens | 火山返回的 usage（事件/接口） | ✅ 直接返回 | 平台字段：`input_tokens`、`output_tokens`、`cache_read_input_tokens`、`cache_creation_input_tokens`；落库映射见 3.7.3。注意：usage 随一轮内的**每次模型请求**（`span.model_request_end`，一轮因工具往返可有 N 次）分别返回，**Node 需在本轮内累加后只落一行汇总值**；该事件携带的平台 request_id 为单次模型请求粒度，**不落库**，仅在需与火山账单逐笔核对时回查事件流 |
 | running_duration_ms | 后端观察 running → idle 自行计时 | ❌ 平台不直接给单次时长 | 由 started_at / ended_at 计算，可靠 |
 | cost | 后端按官方单价回算 | ❌ 平台不直接给单次费用 | 由 token / 时长 / 工具次数计算，不得采信模型返回值 |
 | model | 业务侧创建 Agent 时指定，或事件返回 | ✅ 业务侧已知 | 若会话可覆写模型，需记录覆写后的值 |
 | error_code / error_msg | `error` 事件（后端归一化） | ⚠️ 事件归一化 | 4.2 已注明 error 为归一化事件，非方舟原生事件名 |
-| oss_path / 文件归属 | `GET /files?scope_id={sessionId}` + 私有 TOS 归档 | ✅ 平台返回文件，路径业务侧定 | 4.2 已确认产物文件通过该接口轮询获取；归属本轮的 `agent_call_log.id`（发送→idle 时间窗登记，见 3.7.4） |
+| oss_path / 文件归属 | `GET /files?scope_id={session_id}&purpose=agent`（已确认） | ✅ 直接返回 | Skill 写 `/mnt/session/outputs` 自动注册为 `purpose=agent`；查询**必须带 `purpose=agent`**（默认 `user_data` 过滤会返回空）；归属本轮的 `agent_call_log.id`（发送→idle 时间窗登记，见 3.7.4）。是否再归档私有 TOS 取决于 P0-1 |
 
 #### 3.7.1 business_user_agent_binding（业务用户-平台资源绑定，用户级）
 对应 3.4.3 原 `user_agent_bind` 的落表，解决「创建会话前需知道挂哪个 Memory Store」的引导问题。
@@ -290,7 +292,7 @@ MA 平台层内部拆解：
 | user_id | VARCHAR(64) | 业务用户 ID | 是 |
 | platform_session_id | VARCHAR(128) | 火山 Session ID（唯一） | 是 |
 | agent_id | VARCHAR(128) | 创建会话时的 Agent 实例 ID | 否 |
-| agent_version | VARCHAR(32) | 会话快照的 Agent 版本号 | 否 |
+| agent_version | VARCHAR(32) | Agent 版本号（创建、查询会话返回，会话创建后全程不变） | 否 |
 | is_default | TINYINT | 1 默认会话 / 0 临时会话 | 是 |
 | platform_status | VARCHAR(32) | 火山状态：idle / running / terminated | 是 |
 | biz_status | TINYINT | 0 活跃 / 1 已结束（terminated 时置 1） | 是 |
@@ -341,7 +343,7 @@ MA 平台层内部拆解：
 | expire_at | DATETIME(3) | 到期时间（30 天） | 是 |
 | created_at | DATETIME(3) | 创建时间 | 是 |
 
-约束/索引：`INDEX(call_log_id)`；`INDEX(user_id, created_at)`；`INDEX(expire_at)`（清理任务用）；`INDEX(session_id)`。该表替换 3.3 中「历史文件索引放 Memory Store 单条 JSON」的写法，DB 作为文件索引真源，支持列表/分页/生命周期清理。文件登记方式：Node 在发送消息时先插入 `agent_call_log` 行取得自增 `id`，本轮 `session.status_idle` 后通过 `GET /files?scope_id={sessionId}` 轮询到产物文件（同一 Session 不支持并发，发送→idle 时间窗内的新文件即归属本轮），归档 TOS 后以该 `id` 回填 `call_log_id`；一轮可登记多个文件（md/xlsx）。
+约束/索引：`INDEX(call_log_id)`；`INDEX(user_id, created_at)`；`INDEX(expire_at)`（清理任务用）；`INDEX(session_id)`。该表替换 3.3 中「历史文件索引放 Memory Store 单条 JSON」的写法，DB 作为文件索引真源，支持列表/分页/生命周期清理。文件登记方式：Node 在发送消息时先插入 `agent_call_log` 行取得自增 `id`，本轮 `session.status_idle` 后调用 `GET /files?scope_id={session_id}&purpose=agent` 轮询产物文件（Skill 写 `/mnt/session/outputs` 自动注册为 `purpose=agent`；同一 Session 不支持并发，发送→idle 时间窗内的新文件即归属本轮），以该 `id` 回填 `call_log_id`；一轮可登记多个文件（md/xlsx）。若 P0-1 结论需 30 天留存，再将文件归档私有 TOS 并写 `oss_path`；否则仅登记平台 file_id（默认存储 7 天）。
 
 #### 3.7.5 建表 SQL（MySQL 8，参考）
 ```sql
@@ -441,7 +443,7 @@ CREATE TABLE agent_report_file (
 | `session.status_idle`（真正空闲） | 本轮分析任务结束 | 标记任务完成、停止计时、异步更新索引 |
 | `agent.custom_tool_use` | custom tool 开始执行（二期/回调链路） | 记录日志、前端展示执行状态 |
 
-> 说明：① 事件类型以官方「会话事件类型」文档为准，custom tool 事件带 `agent.` 前缀；② 方舟原生事件中未见 `file` 事件，产物文件在 `session.status_idle` 后通过 `GET /files?scope_id={sessionId}` 轮询获取，再更新索引并向前端提供下载链接；③ 后端向前端透出的 `error` 为归一化错误事件，非方舟原生事件名。
+> 说明：① 事件类型以官方「会话事件类型」文档为准，custom tool 事件带 `agent.` 前缀；② 方舟原生事件中未见 `file` 事件，产物文件在 `session.status_idle` 后通过 Files API 轮询获取：Skill 写入沙箱 `/mnt/session/outputs` 目录的文件会**自动注册到 Files API，用途标记为 `purpose=agent`**；`GET /files` 默认按 `purpose=user_data` 过滤（只返回用户上传文件），**必须显式带 `scope_id={session_id}&purpose=agent`**，否则返回空列表会误判为无产物；取到文件后更新索引并向前端提供下载链接；③ 后端向前端透出的 `error` 为归一化错误事件，非方舟原生事件名。
 
 ---
 
@@ -480,7 +482,7 @@ CREATE TABLE agent_report_file (
 
 ### 6.3 审计追溯
 - 所有 Skill 调用、文件生成、任务执行均有完整会话事件日志
-- 支持按 `session_id`、`biz_user_id` 追溯完整执行链路与操作记录
+- 支持按 `session_id`、`user_id` 追溯完整执行链路与操作记录
 - 规则更新、凭据更新均留存操作日志，可审计
 
 ---
@@ -557,5 +559,67 @@ CREATE TABLE agent_report_file (
 3.  **灰度验证**：先小范围用户试点，验证性能、成本、稳定性后全量推广
 4.  **预案准备**：提前准备平台异常降级方案，核心业务场景配置备用调用路径
 
+
+## 十、待确认项清单（评审决策用）
+> 每项按「设计目的（解决什么问题）→ 为何待确认 → 需确认的因素」列出。**P0 不定不编码；P1 不挡编码、上线前必须验完；P2 为内部业务/商务确认，不阻塞技术开发；P3 属二期。**
+
+### 10.1 P0：编码前必须确定
+
+#### P0-1 一期取数结果文件是否需要 30 天留存（决定挂不挂私有 TOS）
+- **设计目的**：私有 TOS 方案要解决的问题只有一个——文件在沙箱回收/平台默认存储 7 天删除之后仍可下载，满足 30 天留存与历史追溯。
+- **为何待确认**：30 天的依据是「分析报告法定留存」，一期不做分析、产物是取数结果 Excel，该留存要求是否适用于取数文件尚未经合规确认；这直接决定一期要不要挂 TOS。
+- **需确认的因素**：
+  1. 合规/法务：取数结果文件是否属于法定留存范围、留存多久；
+  2. 业务方：即便不法定，是否仍要求 N 天历史回溯下载，N 取多少；
+  3. 结论为「7 天内即可」→ 用平台默认存储（产物发现链路已确认：写 `/mnt/session/outputs`、`GET /files` 带 `purpose=agent`，见 4.2），砍掉桶挂载/归档/清理任务；结论为「需 30 天」→ 保留 3.5 方案，并补验挂载 TOS 目录是否同样注册到 Files API（若否则 Node 直接列举桶对象取 `oss_path`）。
+
+#### P0-2 同一 Session 并发请求的处理策略
+- **设计目的**：平台约束同一 Session 不能并发处理两条消息，后端必须决定用户在上一任务未结束时再发消息怎么办，防止平台报错或请求互相覆盖（3.2.1）。
+- **为何待确认**：「排队」与「拒绝」对应两套完全不同的 Node 实现（队列+状态机+超时通知 vs 前置状态校验直接返回）和前端交互，属产品决策，不能由开发自行选择。
+- **需确认的因素**：
+  1. 产品取舍：排队等待（队列长度、排队超时、前端提示）还是直接拒绝（"上一任务进行中"）；
+  2. 是否允许为同用户创建临时独立会话做并行分析（上下文不复用的代价是否接受）；
+  3. 并发状态的落点：`business_agent_session.platform_status` + 行锁，还是 Redis 锁。
+
+### 10.2 P1：不挡编码，上线前必须验证（字段/事件映射级）
+
+#### P1-1 `span.model_request_end` 的 usage / request_id 字段结构与累加口径
+- **设计目的**：一轮任务含 N 次模型请求，Node 需把 N 份 usage 累加为一行汇总落 `agent_call_log`，用于成本回算与账单对账（3.7.0）。
+- **为何待确认**：事件名称与「一轮 N 次、成对下发」已由实测确认，但事件体内 usage、request_id 的**准确字段名与层级**未以官方文档逐字核实（外网受限）；属映射层风险，不影响表结构。
+- **需确认的因素**：
+  1. usage 四字段的准确名称/层级（input/output/cache_read/cache_creation）；
+  2. request_id 字段位置，确认其确为单次模型请求粒度（不落库、仅对账回查）；
+  3. N 次累加的边界（以哪些事件界定一轮）。
+
+#### P1-2 官方会话事件类型清单复核
+- **设计目的**：事件解析、任务收口（只认真正的 `session.status_idle`，`requires_action` 不算结束）、工具计数与错误归一化（4.2）。
+- **为何待确认**：当前事件名与语义来自调研项目实测记录，非官方文档原文，需在编码对接前以官方「会话事件类型」文档逐字复核。
+- **需确认的因素**：custom tool 事件前缀、`requires_action` 语义与续跑方式、error 事件的归一化口径。
+
+### 10.3 P2：内部业务/商务确认（不阻塞开发）
+
+#### P2-1 `agent_call_log` 审计保留周期
+- **设计目的**：确定审计表按月分区/归档策略与存储容量（3.7.6）。
+- **为何待确认**：保留周期取决于财务对账与合规要求，技术侧不能自定。
+- **需确认的因素**：保留月数（建议 ≥90 天）、是否按月分区、归档介质与查询方式。
+
+#### P2-2 成本单价核对
+- **设计目的**：7.1 月度成本测算作为立项/采购输入，数字不能是臆测值。
+- **为何待确认**：TOS（0.0015 元/GB/时）、模型 token、沙箱（0.5 元/时）单价均需以官方价目页/购买页为准。
+- **需确认的因素**：三项官方现价、缓存 token 折扣单价、ArkClaw 席位当期报价与最低 5 席规则。
+
+#### P2-3 超时阈值取值与「超时」口径统一
+- **设计目的**：既避免异常长任务空耗沙箱，又不误杀正常的长耗时分析。
+- **为何待确认**：已明确**等待 Agent 事件不设总超时、SSE 靠断点续传**；但 3.1.1「合理超时阈值」、5.1「超出运行阈值中断任务」措辞含糊，开发可能误加任务级总超时；取数分页的单次 HTTP 超时值也缺数据支撑。
+- **需确认的因素**：
+  1. leyosys 接口 P95/P99 响应时间 → 单次分页 HTTP 超时取值；
+  2. 分页页数/数据量上限（与 ≤10MB、超限提示联动）；
+  3. 是否保留任务级软超时（只告警/可中断，而非连接层硬超时），并据此统一 3.1.1、5.1 文字。
+
+### 10.4 P3：二期 POC（不挡一期）
+1. 会话共享目录的挂载形态，以及接近 10MB 单文件的读写实测（3.1.3）；
+2. Vault 凭据 PUT 更新是否对已运行会话实时生效（3.4.2）。
+
+---
 
 ## [参考文档](./managed-agent-docs.md)
