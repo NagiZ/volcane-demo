@@ -52,6 +52,61 @@ MA 平台层内部拆解：
 - **Skill 执行层**：leyosys 取数 Skill、规则执行引擎 Skill、内置文件生成能力
 - **基础资源层**：沙箱运行环境、Memory Store（每用户独立库：用户配置+权限标识）、私有 TOS 归档存储；Vault（用户级凭据库）为二期进阶项
 
+**架构总览（组件与数据流视图）：**
+
+```mermaid
+flowchart TB
+    subgraph L1["用户交互层（本方案不涉及）"]
+        FE["前端对话入口<br/>文件下载 / 历史查询"]
+    end
+
+    subgraph L2["接入转发层（仅涉及 MA 对接逻辑）"]
+        NODE["Node.js 自研后端<br/>用户鉴权 · 请求转发<br/>事件透传 · 资源管理"]
+    end
+
+    subgraph L3["MA 平台层（火山 Managed Agents，核心）"]
+        subgraph L3A["Agent 调度层"]
+            LLM["大模型<br/>指令解析 · Skill 编排 · 结果整合"]
+        end
+        subgraph SBX["沙箱运行环境"]
+            subgraph L3B["Skill 执行层"]
+                S1["leyosys 取数 Skill（一期）"]
+                S2["规则执行引擎 Skill（二期）"]
+                FGEN["内置文件生成能力"]
+            end
+        end
+        subgraph L3C["基础资源层（随会话挂载）"]
+            MS[("Memory Store<br/>每用户一库<br/>偏好 + 权限标识")]
+            TOS[("私有 TOS 归档<br/>30 天留存")]
+            VAULT[("Vault 凭据库（二期）")]
+        end
+    end
+
+    subgraph L4["业务依赖层（本方案不涉及，仅定义契约）"]
+        LEY["leyosys 业务系统接口<br/>用户级鉴权"]
+        RULE["业务规则配置源（二期）"]
+    end
+
+    DB[("MySQL<br/>binding / session<br/>call_log / report_file")]
+
+    FE <-->|"SSE / HTTP"| NODE
+    NODE -->|"创建会话 / 发送事件<br/>SSE 事件流"| LLM
+    NODE -->|"读写用户偏好与权限"| MS
+    NODE -->|"资源绑定 / 会话<br/>审计 / 文件索引"| DB
+    NODE -->|"文件下载链接"| TOS
+    NODE -.->|"二期：创建 / 更新凭据库"| VAULT
+
+    LLM -->|"编排调用"| S1
+    LLM -->|"二期：data_path 入参"| S2
+    LLM -->|"生成结果文件"| FGEN
+
+    S1 -->|"HTTP 取数<br/>（会话环境变量凭据）"| LEY
+    S2 -->|"拉取最新规则"| RULE
+    FGEN -->|"写 /mnt/session/outputs"| TOS
+
+    S1 -.->|"二期：会话共享目录<br/>写文件 + 返回路径"| S2
+```
+
 ### 2.2 核心 Skill 分工与职责边界
 | Skill 名称 | 形态 | 职责 | 输入 | 输出 |
 |---|---|---|---|---|
