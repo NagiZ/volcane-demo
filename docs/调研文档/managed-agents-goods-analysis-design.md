@@ -243,7 +243,7 @@ MA 平台层内部拆解：
 | platform_status / stop_reason | `session.status_*` 事件（idle / running / terminated + stop_reason） | ✅ 直接返回 | 4.2 已确认 |
 | agent_id / agent_version | 创建会话时使用的 Agent 及快照 | ✅ 创建时业务侧已知；`agent_version` 是否由平台返回需 POC | 无版本返回时由业务侧自维护 |
 | tool_call_count | 事件流中的 `tool_use` / `agent.custom_tool_use` 逐次计数 | ⚠️ 由事件计数 | 需 POC 确认火山逐次下发工具调用事件 |
-| input_tokens / output_tokens / cache_read_tokens | 若 SSE 事件含 usage 则直取；否则从火山用量/账单 API 回填 | ⚠️ **待 POC** | **上线前必验：事件流是否返回 usage**；未确认前三列保持可空，事后回填 |
+| input_tokens / output_tokens / cache_read_tokens / cache_creation_tokens | 火山返回的 usage（事件/接口） | ✅ 直接返回 | 平台字段：`input_tokens`、`output_tokens`、`cache_read_input_tokens`、`cache_creation_input_tokens`；落库映射见 3.7.3 |
 | running_duration_ms | 后端观察 running → idle 自行计时 | ❌ 平台不直接给单次时长 | 由 started_at / ended_at 计算，可靠 |
 | cost | 后端按官方单价回算 | ❌ 平台不直接给单次费用 | 由 token / 时长 / 工具次数计算，不得采信模型返回值 |
 | model | 业务侧创建 Agent 时指定，或事件返回 | ✅ 业务侧已知 | 若会话可覆写模型，需记录覆写后的值 |
@@ -296,9 +296,11 @@ MA 平台层内部拆解：
 | status | TINYINT | 0 成功 / 1 失败 | 是 |
 | error_code | VARCHAR(64) | 错误码 | 否 |
 | error_msg | VARCHAR(512) | 错误信息 | 否 |
-| input_tokens | INT | 输入 Token | 否 |
-| output_tokens | INT | 输出 Token | 否 |
-| cache_read_tokens | INT | 缓存命中读取 Token | 否 |
+| input_tokens | INT | 未命中缓存的新增输入 Token（计费输入项） | 否 |
+| output_tokens | INT | 模型生成的全部输出 Token（计费输出项） | 否 |
+| cache_read_tokens | INT | 命中缓存读取 Token（平台 `cache_read_input_tokens`，单价更低） | 否 |
+| cache_creation_tokens | INT | 新增创建缓存 Token（平台 `cache_creation_input_tokens`，缓存存储计费，可选） | 否 |
+| total_tokens | INT | 总消耗 Token（`input_tokens + output_tokens + cache_read_tokens`） | 否 |
 | tool_call_count | INT | 内置工具调用次数 | 否 |
 | running_duration_ms | INT | 运行时长（毫秒） | 否 |
 | cost | DECIMAL(12,6) | 折算费用（后算，可空） | 否 |
@@ -306,7 +308,7 @@ MA 平台层内部拆解：
 | started_at | DATETIME(3) | 开始时间 | 是 |
 | ended_at | DATETIME(3) | 结束时间 | 否 |
 
-约束/索引：`UNIQUE(request_id)`；`INDEX(user_id, started_at)`；`INDEX(session_id)`。火山计费为「Token + 运行时长 + 工具调用次数」三段，因此把 Token 拆输入/输出/缓存命中，并记录 `running_duration_ms`、`tool_call_count`，才能按官方单价回算 `cost`；`cost` 由后端统一计算，不直接采信模型/前端返回值。
+约束/索引：`UNIQUE(request_id)`；`INDEX(user_id, started_at)`；`INDEX(session_id)`。火山计费为「Token + 运行时长 + 工具调用次数」三段，因此按火山 usage 拆分输入/输出/缓存命中/缓存创建四类 Token，并记录 `running_duration_ms`、`tool_call_count`，才能按官方单价回算 `cost`。`total_tokens` 按 `input_tokens + output_tokens + cache_read_tokens` 汇总；`cache_creation_tokens` 为缓存存储计费口径，最终计费以火山账单为准。`cost` 由后端统一计算，不直接采信模型/前端返回值。
 
 #### 3.7.4 agent_report_file（报告文件索引，30 天生命周期）
 | 字段 | 类型 | 说明 | 必填 |
@@ -369,6 +371,8 @@ CREATE TABLE agent_call_log (
   input_tokens INT NULL,
   output_tokens INT NULL,
   cache_read_tokens INT NULL,
+  cache_creation_tokens INT NULL,
+  total_tokens INT NULL,
   tool_call_count INT NULL,
   running_duration_ms INT NULL,
   cost DECIMAL(12,6) NULL,
