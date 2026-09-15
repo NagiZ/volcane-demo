@@ -1,6 +1,7 @@
 # 火山引擎 Managed Agents 商品异常分析Agent 技术方案
-> **版本**：V1.3（评审修订稿）
+> **版本**：V1.4（评审修订稿）
 > **V1.3 修订**：① **一期不做分析（规则执行引擎）Skill**，诊断分析能力整体后移二期；一期链路为「指令理解 → leyosys 取数 Skill（鉴权/接口选择已在 Skill 内闭环）→ 结果对话/文件交付」。② **明确多 Skill 大数据传递机制（见 3.1.3）**：同会话多 Skill 的沙箱本地文件系统不互通、也不能编程互调；大数据经**会话共享目录约定路径**中转——取数 Skill 写共享目录、返回值带路径，Agent 将路径作为显式入参传给分析 Skill，分析 Skill 定义路径入参读文件，数据本身不过模型上下文。
+> **V1.4 修订**：① 完善 `business_agent_session` 支持「会话升级只读」——新增 `biz_status=2`、`skill_version`、`frozen_reason`、`frozen_at`；② 新增 `agent_event_log` 会话事件流水表，逐事件落库保存消息与工具调用，用于评估/审计。
 > **更新说明**：V1.1 修订：① 一期鉴权改用会话环境变量注入，Vault 调整为二期进阶方案（需同步改造 leyosys/Skill）；② Memory Store 改为每用户独立单库，全局规则改由业务侧配置源实时拉取；③ 修正 SSE 事件语义（custom_tool 前缀、requires_action、file/error 事件），补充单会话并发限制与成本假设出处。仍保留：leyosys 用户级鉴权、规则全量热更新不中断会话、报告法定留存 30 天、单次单用户数据≤10MB、约 1000 名内部用户。
 > **V1.2 修订**：新增 3.7 数据表结构设计（`business_user_agent_binding` / `business_agent_session` / `agent_call_log` / `agent_report_file` 四张表）；历史分析文件索引由 Memory Store 迁至 `agent_report_file` 表，Memory Store 仅保留用户偏好与权限标识。
 > **方案边界**：本方案仅覆盖火山引擎 Managed Agents 平台侧的对接设计、Agent 配置、Skill 集成、资源管理、会话与事件处理，不包含 leyosys 业务系统本身、业务规则引擎的后端开发与运维。
@@ -416,16 +417,21 @@ flowchart TB
 | platform_session_id | VARCHAR(128) | 火山 Session ID（唯一） | 是 |
 | agent_id | VARCHAR(128) | 创建会话时的 Agent 实例 ID | 否 |
 | agent_version | VARCHAR(32) | Agent 版本号（创建、查询会话返回，会话创建后全程不变） | 否 |
+| skill_version | VARCHAR(64) | 会话快照的 Skill 版本（若平台单独返回则记录；否则并入 agent_version 判定） | 否 |
 | is_default | TINYINT | 1 默认会话 / 0 临时会话 | 是 |
 | platform_status | VARCHAR(32) | 火山状态：idle / running / terminated | 是 |
-| biz_status | TINYINT | 0 活跃 / 1 已结束（terminated 时置 1） | 是 |
+| biz_status | TINYINT | 0 活跃 / 1 已结束 / 2 只读（冻结） | 是 |
+| frozen_reason | VARCHAR(128) | 只读原因：agent_upgrade / skill_upgrade / credential_rotated 等 | 否 |
+| frozen_at | DATETIME(3) | 置为只读的时间 | 否 |
 | title | VARCHAR(255) | 会话标题/摘要 | 否 |
 | credential_version | VARCHAR(64) | 本次注入的用户凭据版本（轮换重建用） | 否 |
 | created_at | DATETIME(3) | 创建时间 | 是 |
 | last_active_at | DATETIME(3) | 最后活跃时间 | 是 |
 | terminated_at | DATETIME(3) | 终止时间 | 否 |
 
-约束/索引：`UNIQUE(platform_session_id)`；`INDEX(user_id)`；「每用户唯一默认会话」由应用层保证 `is_default=1` 唯一。保留 `platform_status` 与 `biz_status` 两层：平台状态用于对接事件流，业务状态用于前端展示与清理；`credential_version` 用于识别凭据轮换前的旧会话。
+约束/索引：`UNIQUE(platform_session_id)`；`INDEX(user_id)`；`INDEX(user_id, is_default)`；「每用户唯一默认会话」由应用层保证 `is_default=1` 唯一。保留 `platform_status` 与 `biz_status` 两层：平台状态用于对接事件流，业务状态用于前端展示与清理；`credential_version` 用于识别凭据轮换前的旧会话。
+
+会话升级只读语义：`biz_status=2` 表示该会话快照已过期（agent/skill 升级或凭据轮换），后端**禁止在该会话继续发送普通消息**，应引导用户新建默认会话。判定方式：每次收到新消息前，后端比对 `agent_version`（及 `skill_version`）与当前最新版本，不一致则将旧会话置 `biz_status=2` 并写 `frozen_reason`/`frozen_at`；只读会话保留历史可查、可归档，但不再接受新轮次。
 
 #### 3.7.3 agent_call_log（调用审计，一次分析任务一行）
 | 字段 | 类型 | 说明 | 必填 |
@@ -468,7 +474,31 @@ flowchart TB
 
 约束/索引：`INDEX(call_log_id)`；`INDEX(user_id, created_at)`；`INDEX(expire_at)`（清理任务用）；`INDEX(session_id)`。该表替换 3.3 中「历史文件索引放 Memory Store 单条 JSON」的写法，DB 作为文件索引真源，支持列表/分页/生命周期清理。文件登记方式：Node 在发送消息时先插入 `agent_call_log` 行取得自增 `id`，本轮 `session.status_idle` 后调用 `GET /files?scope_id={session_id}&purpose=agent` 轮询产物文件（Skill 写 `/mnt/session/outputs` 自动注册为 `purpose=agent`；同一 Session 不支持并发，发送→idle 时间窗内的新文件即归属本轮），以该 `id` 回填 `call_log_id`；一轮可登记多个文件（md/xlsx）。若 P0-1 结论需 30 天留存，再将文件归档私有 TOS 并写 `oss_path`；否则仅登记平台 file_id（默认存储 7 天）。
 
-#### 3.7.5 建表 SQL（MySQL 8，参考）
+#### 3.7.5 agent_event_log（会话事件流水，评估/审计用）
+> 用途：完整保存一轮会话的原始事件（用户消息、助手消息、工具调用与结果、状态变化），供事后评估、质量分析、复现与审计。与 `agent_call_log` 的差异：`agent_call_log` 是**按轮聚合**的统计行（成本/用量），本表是**按事件**的流水（保真时序）。
+
+| 字段 | 类型 | 说明 | 必填 |
+|---|---|---|---|
+| id | BIGINT | 自增主键 | 是 |
+| session_id | VARCHAR(128) | 火山 Session ID | 是 |
+| call_log_id | BIGINT | 关联 `agent_call_log.id`（本轮任务；先到的事件可后回填，可空） | 否 |
+| event_id | VARCHAR(128) | SSE 事件 id（断点续传去重用，可空） | 否 |
+| seq | BIGINT | 会话内单调递增序号（事件到达顺序） | 是 |
+| event_type | VARCHAR(64) | 事件类型（`user.message` / `agent.message` / `agent.custom_tool_use` / `session.status_*` / `error` 等，以官方「会话事件类型」为准） | 是 |
+| role | VARCHAR(16) | user / assistant / tool（可空） | 否 |
+| content | JSON | 结构化内容（文本、工具名、参数、结果摘要等） | 否 |
+| raw_payload | JSON | 原始事件完整 JSON（保真，评估复现用） | 是 |
+| recorded_at | DATETIME(3) | 后端落库时间 | 是 |
+
+约束/索引：`UNIQUE(session_id, event_id)`（event_id 非空时）；`INDEX(session_id, seq)`；`INDEX(call_log_id)`。
+
+**记录时机（关键）**：见 4.2 及官方「流式获取会话事件（SSE）」「Session 事件流总览」。
+- **逐事件落库，不等轮次结束**。助手文本会以 delta 流式推送，工具调用是长程调用（先工具开始、很久后才返回结果），只有在每个 SSE 事件到达时立即 append，才能保留真实时序与中间状态。
+- 断线重连用 SSE `id`（`Last-Event-ID`）幂等去重，避免重复落库。
+- `call_log_id` 关联：Node 在发送 `user.message` 前先插入 `agent_call_log` 拿到自增 id，随后本轮所有事件回填该 id，直到 `session.status_idle`（非 `requires_action`）结束本轮。
+- 不建议在 `status_idle` 后一次性批量落库：会丢失工具调用中间态、无法还原长程调用时序，也不利于评估“工具调用是否成功/参数是否正确”。
+
+#### 3.7.6 建表 SQL（MySQL 8，参考）
 ```sql
 CREATE TABLE business_user_agent_binding (
   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -487,16 +517,20 @@ CREATE TABLE business_agent_session (
   platform_session_id VARCHAR(128) NOT NULL,
   agent_id VARCHAR(128) NULL,
   agent_version VARCHAR(32) NULL,
+  skill_version VARCHAR(64) NULL,
   is_default TINYINT NOT NULL DEFAULT 0,
   platform_status VARCHAR(32) NOT NULL DEFAULT 'idle',
-  biz_status TINYINT NOT NULL DEFAULT 0,
+  biz_status TINYINT NOT NULL DEFAULT 0 COMMENT '0 活跃 / 1 已结束 / 2 只读(冻结)',
+  frozen_reason VARCHAR(128) NULL,
+  frozen_at DATETIME(3) NULL,
   title VARCHAR(255) NULL,
   credential_version VARCHAR(64) NULL,
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   last_active_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   terminated_at DATETIME(3) NULL,
   UNIQUE KEY uk_platform_session (platform_session_id),
-  KEY idx_user (user_id)
+  KEY idx_user (user_id),
+  KEY idx_user_default (user_id, is_default)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE agent_call_log (
@@ -539,11 +573,28 @@ CREATE TABLE agent_report_file (
   KEY idx_expire (expire_at),
   KEY idx_session (session_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE agent_event_log (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  session_id VARCHAR(128) NOT NULL,
+  call_log_id BIGINT UNSIGNED NULL,
+  event_id VARCHAR(128) NULL,
+  seq BIGINT NOT NULL,
+  event_type VARCHAR(64) NOT NULL,
+  role VARCHAR(16) NULL,
+  content JSON NULL,
+  raw_payload JSON NOT NULL,
+  recorded_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  UNIQUE KEY uk_event (session_id, event_id),
+  KEY idx_session_seq (session_id, seq),
+  KEY idx_call_log (call_log_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 ```
 
-#### 3.7.6 生命周期与清理
-- 会话：`business_agent_session.last_active_at` 超过阈值（结合平台 30 天沙箱回收）置 `biz_status=1` 或归档；用户离职同步清理。
+#### 3.7.7 生命周期与清理
+- 会话：`business_agent_session.last_active_at` 超过阈值（结合平台 30 天沙箱回收）置 `biz_status=1` 或归档；agent/skill 升级置 `biz_status=2`（只读）而非删除，保留历史可查；用户离职同步清理。
 - 审计：`agent_call_log` 按月分区/归档，保留周期与财务对账要求一致（建议 ≥90 天，待确认）。
+- 事件流水：`agent_event_log` 仅用于评估/审计，保留窗口建议与评估需求一致（≥90 天，待确认）；因含原始事件 payload，需权限管控与脱敏。
 - 文件：定时任务按 `agent_report_file.expire_at` 清理私有 TOS 对象并置 `status=1`，与 30 天生命周期一致。
 ---
 
