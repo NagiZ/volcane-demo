@@ -338,18 +338,21 @@ public interface AgentPlatform {
   - 文件索引：已迁至 `agent_report_file` 表，与 TOS 归档文件生命周期同步（30 天），到期同步清理（见 3.7.6）
   - 规则数据：生命周期由业务侧配置源管理（保留最近 3 版），与本库解耦
 
-### 3.4 凭据管理设计（统一：会话环境变量注入 token）
-#### 3.4.1 统一方案
-- **三平台统一**：创建会话时注入用户 token 到会话环境变量，Skill 沙箱内读取环境变量调用业务接口。token 仅在会话创建时注入、运行期不可变，轮换时重建会话注入新 token。
-- **火山**：`CreateSessionRequest.environment.config.env`（`EnvironmentConfigOverride.env`）注入，已由 SDK 源码核实。
-- **百炼 / 腾讯**：由各自 `AgentPlatform` 适配器实现等价注入；百炼公开 API 的会话级环境变量注入、腾讯 `CustomVariables`/变量管理的确切用法需 POC 复核。
+### 3.4 凭据管理设计（去 Vault，按平台能力注入 token）
+#### 3.4.1 三平台实测结论（已核对官方文档）
+- **火山**：✅ 创建会话时经 `environment.config.env`（`EnvironmentConfigOverride.env`，`Map<String,String>`）注入环境变量，Skill 沙箱内读取；已由 SDK 源码核实。
+- **百炼**：❌ 创建会话 API（`POST /sessions`）请求体仅含 `agent` / `environment_id` / `title` / `resources`，**无环境变量/密钥注入字段**；「密钥库」仅是控制台标签页，无对应 API。→ token 不能经会话环境变量注入，取数须走 MCP/回调，由后端持 token。
+- **腾讯 ADP**：⚠️ 新建会话（`CreateConversation`）无环境变量字段；变量通过**对话请求** `CustomVariables`（`Map[String]String` 用户自定义变量）传递，属于「每次对话传变量」，不是「会话级沙箱环境变量」。→ token 可放 `CustomVariables` 随对话传，或走后端持有型。
+
+结论：**「创建会话传环境变量」只有火山原生支持**；百炼走后端持有型（MCP/回调），腾讯走 `CustomVariables` 或后端持有型。三平台不能统一成同一种注入方式，由 `CredentialProvider` 适配。
 
 #### 3.4.2 CredentialProvider 抽象
-- **注入型**（火山为主）：适配器把 token 写入 env，随 `createSession` 提交。
+- **注入型**（火山）：适配器把 token 写入 `env`，随 `createSession` 提交。
+- **对话变量型**（腾讯）：token 写入对话请求 `CustomVariables`，随每次对话提交。
 - **后端持有型**（百炼/腾讯兜底）：token 不注入沙箱，取数走 MCP/回调，由后端持 token 调业务接口。
 
 #### 3.4.3 安全边界
-- token 仅注入当前用户会话环境变量，沙箱与会话隔离；不向前端暴露，日志/事件流不打印完整 token。
+- token 仅对当前用户会话可见（环境变量/对话变量），按用户隔离；不向前端暴露，日志/事件流不打印完整 token。
 - 最小权限：仅注入业务接口调用所必需的 token。
 
 #### 3.4.4 资源绑定关系
