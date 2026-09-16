@@ -1,8 +1,9 @@
 # 火山引擎 Managed Agents 商品异常分析Agent 技术方案
-> **版本**：V1.5（评审修订稿）
+> **版本**：V1.6（评审修订稿）
 > **V1.3 修订**：① **一期不做分析（规则执行引擎）Skill**，诊断分析能力整体后移二期；一期链路为「指令理解 → leyosys 取数 Skill（鉴权/接口选择已在 Skill 内闭环）→ 结果对话/文件交付」。② **明确多 Skill 大数据传递机制（见 3.1.3）**：同会话多 Skill 的沙箱本地文件系统不互通、也不能编程互调；大数据经**会话共享目录约定路径**中转——取数 Skill 写共享目录、返回值带路径，Agent 将路径作为显式入参传给分析 Skill，分析 Skill 定义路径入参读文件，数据本身不过模型上下文。
 > **V1.4 修订**：① 完善 `business_agent_session` 支持「会话升级只读」——新增 `biz_status=2`、`skill_version`、`frozen_reason`、`frozen_at`；② 新增 `agent_event_log` 会话事件流水表，逐事件落库保存消息与工具调用，用于评估/审计。
 > **V1.5 修订**：接入层由 Node.js 自研后端改为 **Java 自研后端（火山官方 `ark-runtime` SDK）**；新增 4.0「Java SDK（ark-runtime）对接说明」，并将全文「Node 后端」统一替换为「Java 后端」（Skill 内部的 `Node 子进程` 描述保留，指既有 Skill 实现细节）。
+> **V1.6 修订**：技术方案平台解耦。① 对外只暴露业务接口，隐藏平台概念；② 接入层引入 `AgentPlatform` 防腐层，火山为首个实现，预留百炼/腾讯 ADP；③ 四张表加 `platform`/`platform_config`/`config_snapshot`，主键改 UUID，`tool_fee` 单列；④ 移除 Vault/凭据库，统一为「创建会话时注入环境变量」管控 token；⑤ 新增三平台事件映射与规范事件枚举。
 > **更新说明**：V1.1 修订：① 一期鉴权改用会话环境变量注入，Vault 调整为二期进阶方案（需同步改造 leyosys/Skill）；② Memory Store 改为每用户独立单库，全局规则改由业务侧配置源实时拉取；③ 修正 SSE 事件语义（custom_tool 前缀、requires_action、file/error 事件），补充单会话并发限制与成本假设出处。仍保留：leyosys 用户级鉴权、规则全量热更新不中断会话、报告法定留存 30 天、单次单用户数据≤10MB、约 1000 名内部用户。
 > **V1.2 修订**：新增 3.7 数据表结构设计（`business_user_agent_binding` / `business_agent_session` / `agent_call_log` / `agent_report_file` 四张表）；历史分析文件索引由 Memory Store 迁至 `agent_report_file` 表，Memory Store 仅保留用户偏好与权限标识。
 > **方案边界**：本方案仅覆盖火山引擎 Managed Agents 平台侧的对接设计、Agent 配置、Skill 集成、资源管理、会话与事件处理，不包含 leyosys 业务系统本身、业务规则引擎的后端开发与运维。
@@ -73,7 +74,7 @@
 
 ### P3：二期 POC（不挡一期）
 1. 会话共享目录的挂载形态，以及接近 10MB 单文件的读写实测（3.1.3）；
-2. Vault 凭据 PUT 更新是否对已运行会话实时生效（3.4.2）。
+2. 会话级环境变量注入在百炼/腾讯的等价能力（3.4.1 待验）。
 
 ---
 
@@ -87,15 +88,15 @@
 3.  支撑约 1000 名内部业务用户稳定使用，单次单用户原始数据量≤10MB
 
 ### 1.2 建设范围
-- ✅ 一期（本版落地）：Agent 编排设计、**leyosys 取数 Skill 集成（鉴权、接口选择、取数均已在 Skill 内实现）**、取数结果对话/文件交付、会话管理、每用户独立 Memory Store 设计、创建会话时直接注入用户凭据环境变量（不经过 Vault 凭据）、文件归档存储、SSE 事件对接、成本与运维设计。**一期不含分析/规则引擎 Skill**
-- ⏭️ 二期（进阶）：**分析（规则执行引擎）Skill 与规则配置源热更新**（多 Skill 大数据按 3.1.3 会话共享目录模式接入）；Vault 凭据库迁移（需同步改造 leyosys/Skill，详见 3.4）
+- ✅ 一期（本版落地）：Agent 编排设计、**leyosys 取数 Skill 集成（鉴权、接口选择、取数均已在 Skill 内实现）**、取数结果对话/文件交付、会话管理、每用户独立 Memory Store 设计、创建会话时直接注入用户凭据环境变量、文件归档存储、SSE 事件对接、成本与运维设计。**一期不含分析/规则引擎 Skill**
+- ⏭️ 二期（进阶）：**分析（规则执行引擎）Skill 与规则配置源热更新**（多 Skill 大数据按 3.1.3 会话共享目录模式接入）
 - ❌ 不包含：leyosys 业务系统开发、业务规则逻辑本身的研发、前端页面开发、业务侧后端服务
 
 ### 1.3 用户与使用模式
 - 目标用户：约 1000 名内部业务运营/分析人员
 - 触发方式：用户主动发送分析指令触发任务
 - 交互形态：单轮完整分析 + 多轮追问细化（如调整维度、重算、补充说明）
-- 鉴权粒度：leyosys 业务接口为**用户级独立鉴权**，每个用户凭据隔离；一期通过会话环境变量注入用户凭据，二期迁移 Vault
+- 鉴权粒度：leyosys 业务接口为**用户级独立鉴权**，每个用户凭据隔离；通过创建会话时注入环境变量承载用户 token
 - 数据规模：单次单用户分析原始数据量≤10MB，沙箱内内存处理，不落地持久化
 
 ### 1.4 核心交付产物
@@ -103,8 +104,8 @@
 2.  **二期**：对话式文字分析结论（异常类型、原因判断、处理建议、依据说明）与结构化分析报告文件（Markdown / Excel）
 
 ### 1.5 平台环境与版本说明
-1. 本方案技术设计同时兼容**火山方舟 Managed Agents（标准版）**与**ArkClaw 企业版**，二者核心 API、Skill 开发规范、工具调用机制完全同源，开发逻辑可无缝复用。
-2. ArkClaw 企业版「平台托管」模式属于标准企业版序列，完整享有企业版全部功能（原生 AGENTS.md 规则文件、企业级 Skill 管理、权限分级等），并非独立降级版本。
+1. 本方案按**平台无关核心 + 平台适配器**组织：对外接口、表结构、防腐层、规范事件与火山/百炼/腾讯三家无关；火山方舟 Managed Agents 为首个实现，通过 `AgentPlatform` 适配器接入。
+2. 平台兼容范围：火山方舟（含 ArkClaw 企业版）、阿里百炼 Managed Agents、腾讯云 ADP；本方案一期只落地火山，百炼/腾讯保留映射占位与 POC 待验项。
 3. 本方案默认按最低兼容路径设计，确保快速上线；ArkClaw 企业版环境下可额外启用原生规则文件、企业级资源管控等增强能力，作为可选优化项。
 ---
 
@@ -113,14 +114,14 @@
 | 层级 | 说明 | 本方案范围 |
 |---|---|---|
 | 用户交互层 | 前端对话入口、文件下载与历史查询 | 不涉及 |
-| 接入转发层 | Java 自研后端（火山 ark-runtime SDK），负责用户鉴权、请求转发、事件透传、资源管理 | 仅涉及 MA 对接相关逻辑 |
-| **MA 平台层（核心）** | 火山 Managed Agents 托管环境 | ✅ 本方案全覆盖 |
+| 接入转发层 | Java 自研后端 + `AgentPlatform` 防腐层，负责用户鉴权、对外业务接口、事件透传、资源管理 | 仅涉及 MA 对接相关逻辑 |
+| **MA 平台层（核心）** | 托管 Agent 平台（火山为首个实现，预留百炼/腾讯 ADP） | ✅ 本方案全覆盖 |
 | 业务依赖层 | leyosys 业务系统接口、业务规则配置源 | 不涉及，仅定义对接契约 |
 
 MA 平台层内部拆解：
 - **Agent 调度层**：大模型推理、指令解析、多 Skill 编排调度、结果整合
 - **Skill 执行层**：leyosys 取数 Skill、规则执行引擎 Skill、内置文件生成能力
-- **基础资源层**：沙箱运行环境、Memory Store（每用户独立库：用户配置+权限标识）、私有 TOS 归档存储；Vault（用户级凭据库）为二期进阶项
+- **基础资源层**：沙箱运行环境、平台记忆/知识（火山 Memory Store 等，按平台能力映射）、产物归档存储（火山私有 TOS 等）
 
 **架构总览（组件与数据流视图）：**
 
@@ -131,7 +132,7 @@ flowchart TB
     end
 
     subgraph L2["接入转发层（仅涉及 MA 对接逻辑）"]
-        JAVA["Java 自研后端（火山 ark-runtime SDK）<br/>用户鉴权 · 请求转发<br/>事件透传 · 资源管理"]
+        JAVA["Java 自研后端<br/>AgentPlatform 防腐层<br/>用户鉴权 · 对外业务接口<br/>事件透传 · 资源管理"]
     end
 
     subgraph L3["MA 平台层（火山 Managed Agents，核心）"]
@@ -148,7 +149,6 @@ flowchart TB
         subgraph L3C["基础资源层（随会话挂载）"]
             MS[("Memory Store<br/>每用户一库<br/>偏好 + 权限标识")]
             TOS[("私有 TOS 归档<br/>30 天留存")]
-            VAULT[("Vault 凭据库（二期）")]
         end
     end
 
@@ -164,8 +164,6 @@ flowchart TB
     JAVA -->|"读写用户偏好与权限"| MS
     JAVA -->|"资源绑定 / 会话<br/>审计 / 文件索引"| DB
     JAVA -->|"文件下载链接"| TOS
-    JAVA -.->|"二期：创建 / 更新凭据库"| VAULT
-
     LLM -->|"编排调用"| S1
     LLM -->|"二期：data_path 入参"| S2
     LLM -->|"生成结果文件"| FGEN
@@ -184,7 +182,7 @@ flowchart TB
 | 规则执行引擎 Skill（分析 Skill） | 沙箱内自定义 Skill（**二期**，一期不建设） | 加载最新业务规则，执行规则匹配、异常分级、根因诊断 | **入参为取数 Skill 写入共享目录的文件路径**（显式 path 入参）+ 动态规则数据 | 异常诊断结论、根因判断、决策建议、依据明细 |
 | Agent 主模型 | 平台内置大模型 | 指令理解、参数提取、Skill 调度、结果整合、多轮对话；多 Skill 时传递共享目录路径 | 用户自然语言指令 | 最终文字回复、文件生成指令 |
 
-> **Skill 形态说明**：leyosys 取数 Skill（一期）与规则执行引擎 Skill（二期）均按**沙箱内自定义 Skill**实现，Skill 在沙箱内直接发起 HTTP 请求（取数调 leyosys 接口、规则调业务侧规则接口），不采用 custom_tool 回调 Java 后端的链路；这也是 Vault 二期改造（Skill 改为 Python 直连）的基础。若后续改为回调 Java 后端执行，需切换为 `agent.custom_tool_use` + `requires_action` 事件流。
+> **Skill 形态说明**：leyosys 取数 Skill（一期）与规则执行引擎 Skill（二期）均按**沙箱内自定义 Skill**实现，Skill 在沙箱内直接发起 HTTP 请求（取数调 leyosys 接口、规则调业务侧规则接口），不采用 custom_tool 回调 Java 后端的链路。若后续改为回调 Java 后端执行，需切换为 `agent.custom_tool_use` + `requires_action` 事件流。
 
 ### 2.3 完整执行主流程
 1.  用户发送自然语言分析指令（指定商品范围、时间、异常类型等）
@@ -198,14 +196,58 @@ flowchart TB
 9.  所有中间事件与最终结果通过 SSE 事件流推送至前端
 10. 任务结束，会话进入 idle 状态，沙箱停止计费；原始数据随沙箱内存释放，不持久化留存（归档文件除外）
 
+### 2.4 对外业务接口（平台无关，前端只认这一套）
+> 原则：对外接口不暴露任何平台概念（session_id、平台 event_type、stop_reason、vault、memory_store 等）。`conversation_id` / `task_id` 均为我方生成的 UUID；接入层负责把我方接口翻译到 `AgentPlatform` 的火山/百炼/腾讯实现。
+
+| 接口 | 说明 |
+|---|---|
+| `POST /conversations` | 创建（或返回已有）业务会话，返回 `conversation_id` |
+| `POST /conversations/{conversation_id}/messages` | 发送用户消息，返回 `task_id`（本轮分析任务） |
+| `POST /conversations/{conversation_id}/interrupt` | 中断当前轮 |
+| `GET /conversations/{conversation_id}/tasks/{task_id}` | 查询本轮任务状态与用量 |
+| `GET /conversations/{conversation_id}/files` | 查询历史产物文件列表 |
+| `GET /files/{file_id}/download` | 下载产物文件 |
+| `SSE /conversations/{conversation_id}/events` | 推送**我方规范事件**（见 4.3） |
+
+对外 SSE 事件（我方规范事件，与平台无关）：`user_message` / `message` / `tool_call` / `tool_result` / `approval` / `turn_end` / `error`。
+
 ---
 
 ## 三、核心模块详细设计
+### 3.0 平台适配层（AgentPlatform 防腐层，平台无关）
+业务逻辑只依赖 `AgentPlatform` 接口，不直接依赖火山/百炼/腾讯 SDK。火山为第一个实现（见 4.0），百炼/腾讯为后续实现。
+
+```java
+public interface AgentPlatform {
+    PlatformSession createSession(CreateSessionCmd cmd);           // 挂资源、注入环境变量凭据
+    PlatformSession getSession(String platformSessionId);
+    void deleteSession(String platformSessionId);
+
+    void sendMessage(String platformSessionId, String text);        // 用户消息
+    void sendInterrupt(String platformSessionId);
+    void submitToolResult(String platformSessionId, String toolCallId, Object result);
+
+    Flowable<NormalizedEvent> streamEvents(String platformSessionId); // 平台事件 → 规范事件
+    List<NormalizedEvent> listEvents(String platformSessionId, String afterEventId);
+
+    Usage getUsage(String platformSessionId, String taskId);         // 归一化用量
+    List<ArtifactRef> listArtifacts(String platformSessionId);       // 产物发现
+    String downloadArtifact(String fileId);                          // 返回下载地址/内容
+}
+```
+
+关键抽象：
+- `PlatformSession`：`platform` + `platformSessionId` + `platformStatus` + `configSnapshot`。
+- `NormalizedEvent`：`platform` + `eventType`（我方规范枚举）+ `eventId` + `seq` + `content` + `rawPayload`。
+- `Usage`：`inputTokens / outputTokens / cacheReadTokens / cacheCreationTokens / runningDurationMs / toolCallCount / toolFee`。
+- `ArtifactRef`：`fileId` + `fileName` + `size` + `url/path`。
+- 凭据抽象 `CredentialProvider`：`injectEnv(Map<String,String> env)`（火山环境变量注入型）或 `resolveCredential(userId)`（百炼/腾讯后端持有型）。
+- 产物抽象 `ArtifactStore`：`register / list / download / archive`，屏蔽火山 TOS、百炼 Files、腾讯知识库/附件差异。
+
 ### 3.1 自定义 Skill 集成设计
 #### 3.1.1 leyosys 取数 Skill
 - **部署形态**：沙箱内本地运行的自定义 Skill，随沙箱启动加载
-- **鉴权方式（一期）**：通过创建 Session 时的 `environment_with_overrides` 注入该用户的 leyosys 鉴权凭据（会话级环境变量），Skill 内直接读取环境变量调用业务接口。凭据仅在会话创建时注入、运行期不可变，凭据轮换时由后端重建会话加载新凭据
-- **二期演进**：迁移至 Vault `environment_variable` 凭据库，需同步改造 leyosys Skill 为 Python 直连（规避 Node 子进程占位符脱敏问题），详见 3.4
+- **鉴权方式**：通过创建会话时注入该用户的 leyosys 鉴权凭据（会话级环境变量），Skill 内直接读取环境变量调用业务接口。凭据仅在会话创建时注入、运行期不可变，凭据轮换时由后端重建会话加载新凭据
 - **数据处理策略**：
   - 单次单用户原始数据量≤10MB，沙箱内存可承载，数据全程在内存中流转处理
   - 不写入沙箱本地持久化文件，避免 IO 开销与数据残留
@@ -296,24 +338,23 @@ flowchart TB
   - 文件索引：已迁至 `agent_report_file` 表，与 TOS 归档文件生命周期同步（30 天），到期同步清理（见 3.7.6）
   - 规则数据：生命周期由业务侧配置源管理（保留最近 3 版），与本库解耦
 
-### 3.4 凭据管理设计（一期：会话环境变量；二期：Vault 进阶）
-#### 3.4.1 一期方案（本版落地）
-- **注入方式**：创建 Session 时通过 `environment_with_overrides` 注入该用户的 leyosys 鉴权凭据（会话级环境变量），Skill 内直接读取环境变量调用业务接口
-- **约束**：环境变量仅在会话创建时注入、运行期不可变；凭据轮换时由后端重建会话加载新凭据
-- **安全边界**：凭据明文存在于沙箱环境变量中，但沙箱按用户隔离；后端不向前端暴露凭据，日志/事件流不打印完整凭据
-- **隔离性**：不同用户会话注入各自凭据，沙箱与会话完全隔离
+### 3.4 凭据管理设计（统一：会话环境变量注入 token）
+#### 3.4.1 统一方案
+- **三平台统一**：创建会话时注入用户 token 到会话环境变量，Skill 沙箱内读取环境变量调用业务接口。token 仅在会话创建时注入、运行期不可变，轮换时重建会话注入新 token。
+- **火山**：`CreateSessionRequest.environment.config.env`（`EnvironmentConfigOverride.env`）注入，已由 SDK 源码核实。
+- **百炼 / 腾讯**：由各自 `AgentPlatform` 适配器实现等价注入；百炼公开 API 的会话级环境变量注入、腾讯 `CustomVariables`/变量管理的确切用法需 POC 复核。
 
-#### 3.4.2 二期进阶：Vault 凭据库（需同步改造 leyosys/Skill）
-> 说明：一期不采用 Vault，原因有二：① 迁移需同步改造 leyosys 取数 Skill；② 现有 Skill 形态存在 Node 子进程读取环境变量时占位符被脱敏为 `SECRET_PLACEHOLDER`、网关无法替换、鉴权失败的问题。
-- **粒度**：**一用户一 Vault**，每个用户独立凭据库，库内仅存放 1 条 `environment_variable` 类型凭据
-- **改造前提**：leyosys 取数 Skill 改为 Python 直接发起 HTTP（不拉起 Node 子进程读环境变量），规避占位符脱敏问题
-- **待 POC 验证项**：凭据更新（PUT）是否对已运行会话实时生效，需以官方 Vault 文档与验收用例为准，正式上线前不得作为结论写死
-- **隔离性**：不同用户 Vault 完全独立，会话之间凭据不互通
+#### 3.4.2 CredentialProvider 抽象
+- **注入型**（火山为主）：适配器把 token 写入 env，随 `createSession` 提交。
+- **后端持有型**（百炼/腾讯兜底）：token 不注入沙箱，取数走 MCP/回调，由后端持 token 调业务接口。
 
-#### 3.4.3 资源绑定关系
-通过两张表维护（详见 3.7）：
-- `business_user_agent_binding`：`user_id ↔ memory_store_id`（二期追加 `vault_id`）
-- `business_agent_session`：`user_id ↔ platform_session_id`，默认会话以 `is_default=1` 标识
+#### 3.4.3 安全边界
+- token 仅注入当前用户会话环境变量，沙箱与会话隔离；不向前端暴露，日志/事件流不打印完整 token。
+- 最小权限：仅注入业务接口调用所必需的 token。
+
+#### 3.4.4 资源绑定关系
+- `business_user_agent_binding`：`user_id ↔ platform ↔ 平台资源引用（platform_config）`
+- `business_agent_session`：`user_id ↔ platform ↔ platform_session_id`，默认会话以 `is_default=1` 标识
 
 ### 3.5 文件30天归档存储设计
 #### 3.5.1 存储方案选型
@@ -374,73 +415,74 @@ flowchart TB
 2. **二期（分析能力）**：建设分析引擎 Skill 与规则配置源，按 3.1.3 会话共享目录模式接入取数结果；商品标准化等基础能力按需拆出。
 3. **三期（动态优化）**：高频规则抽离至 Memory Store 加密存储，支持热更新。
 
-### 3.7 数据表结构设计（评审修订稿）
+### 3.7 数据表结构设计（平台无关 · V1.6 修订）
 > 设计口径：
-> 1. `agent_call_log` 的「一次调用」指**一轮完整分析任务**（一次用户消息触发到本轮回到 idle），不是单次模型/工具请求；否则 Token、时长、工具次数会碎片化，无法对齐计费口径。
-> 2. 审计表只存统计维度，不存消息正文、原始业务明细、规则内容。
-> 3. 用户偏好、权限标识仍放 Memory Store（读多写少、结构稳定）；**历史文件索引改由 DB 承载**（见 `agent_report_file`），避免 Memory Store 单条 JSON 膨胀与列表查询困难。
-> 4. 时间统一用 `DATETIME(3)` 保留毫秒，便于按运行时长与断点续传对账。
+> 1. 四张表均带 `platform`（volcano / bailian / tencent_adp）；稳定通用字段做实体列，平台特有字段进 `platform_config JSON`。
+> 2. 对外业务主键用 UUID（`conversation_id` / `task_id` / `file_id`），DB 内部保留 `id BIGINT AUTO_INCREMENT` 做 join；平台侧标识存 `platform_*` 列或 JSON。
+> 3. `config_snapshot` 为结构化快照（我方配置 hash 为主 + 平台版本辅助），用于会话升级只读判定，见 3.7.2。
+> 4. 审计表只存统计维度，不存消息正文、业务明细、规则内容；事件流水逐事件落库。
+> 5. 时间统一 `DATETIME(3)`。
 
-#### 3.7.0 字段数据来源核对（依赖火山返回的字段）
+#### 3.7.0 字段数据来源核对（火山为首个实现，百炼/腾讯映射见 4.3）
 | 字段 | 数据来源 | 火山是否直接提供 | 说明 |
 |---|---|---|---|
 | platform_session_id | `POST /sessions` 返回的 `id` | ✅ 直接返回 | 4.1 已确认 |
 | platform_status / stop_reason | `session.status_*` 事件（idle / running / terminated + stop_reason） | ✅ 直接返回 | 4.2 已确认 |
-| agent_id / agent_version | 创建、查询会话返回 | ✅ 直接返回（已确认） | 会话创建时确定，**创建后全程不变**，直接落 `business_agent_session.agent_version` |
+| config_snapshot | 我方配置 hash 为主 + 平台版本辅助 | ✅（火山 agent_version 已确认） | 会话创建时确定并落 `config_snapshot`；百炼/腾讯的版本字段待 POC 复核，兜底用我方自管 config 版本 |
 | tool_call_count | 事件流中的工具调用事件（`agent.tool_use` / `agent.mcp_tool_use` / `agent.custom_tool_use`） | ✅ 直接返回（已确认） | 平台**逐次、稳定、成对下发**，每次工具调用有明确事件与唯一 ID，不丢失、不合并；Java 后端按本轮事件对计数，只落本轮汇总数，不存工具明细 |
 | input_tokens / output_tokens / cache_read_tokens / cache_creation_tokens | 火山返回的 usage（事件/接口） | ✅ 直接返回 | 平台字段：`input_tokens`、`output_tokens`、`cache_read_input_tokens`、`cache_creation_input_tokens`；落库映射见 3.7.3。注意：usage 随一轮内的**每次模型请求**（`span.model_request_end`，一轮因工具往返可有 N 次）分别返回，**Java 后端需在本轮内累加后只落一行汇总值**；该事件携带的平台 request_id 为单次模型请求粒度，**不落库**，仅在需与火山账单逐笔核对时回查事件流 |
 | running_duration_ms | 后端观察 running → idle 自行计时 | ❌ 平台不直接给单次时长 | 由 started_at / ended_at 计算，可靠 |
 | cost | 后端按官方单价回算 | ❌ 平台不直接给单次费用 | 由 token / 时长 / 工具次数计算，不得采信模型返回值 |
 | model | 业务侧创建 Agent 时指定，或事件返回 | ✅ 业务侧已知 | 若会话可覆写模型，需记录覆写后的值 |
 | error_code / error_msg | `error` 事件（后端归一化） | ⚠️ 事件归一化 | 4.2 已注明 error 为归一化事件，非方舟原生事件名 |
-| oss_path / 文件归属 | `GET /files?scope_id={session_id}&purpose=agent`（已确认） | ✅ 直接返回 | Skill 写 `/mnt/session/outputs` 自动注册为 `purpose=agent`；查询**必须带 `purpose=agent`**（默认 `user_data` 过滤会返回空）；归属本轮的 `agent_call_log.id`（发送→idle 时间窗登记，见 3.7.4）。是否再归档私有 TOS 取决于 P0-1 |
+| object_path / 文件归属 | 火山 `GET /files?scope_id&purpose=agent`（已确认）；百炼 Files、腾讯按各自能力 | ✅ 火山直接返回 | 火山 Skill 写 `/mnt/session/outputs` 自动注册为 `purpose=agent`；产物发现统一由 `AgentPlatform.listArtifacts` 抽象，归档对象路径落 `object_path` |
 
 #### 3.7.1 business_user_agent_binding（业务用户-平台资源绑定，用户级）
-对应 3.4.3 原 `user_agent_bind` 的落表，解决「创建会话前需知道挂哪个 Memory Store」的引导问题。
-
 | 字段 | 类型 | 说明 | 必填 |
 |---|---|---|---|
 | id | BIGINT | 自增主键 | 是 |
-| user_id | VARCHAR(64) | 业务用户 ID（唯一） | 是 |
-| memory_store_id | VARCHAR(128) | 火山 Memory Store ID（每用户一库） | 是 |
-| vault_id | VARCHAR(128) | 火山 Vault ID（二期接入后使用） | 否 |
+| user_id | VARCHAR(64) | 业务用户 ID | 是 |
+| platform | VARCHAR(32) | 平台：volcano / bailian / tencent_adp | 是 |
+| platform_config | JSON | 平台资源引用（火山 memory_store_id 等；百炼/腾讯按各自能力） | 否 |
 | status | TINYINT | 0 正常 / 1 停用 | 是 |
 | created_at | DATETIME(3) | 创建时间 | 是 |
 | updated_at | DATETIME(3) | 更新时间 | 是 |
 
-约束/索引：`UNIQUE(user_id)`。默认会话不落这张表，由 `business_agent_session.is_default=1` 判定，避免双写不一致。
+约束：`UNIQUE(user_id, platform)`。默认会话不落这张表，由 `business_agent_session.is_default=1` 判定。
 
 #### 3.7.2 business_agent_session（业务会话映射，会话级）
 | 字段 | 类型 | 说明 | 必填 |
 |---|---|---|---|
 | id | BIGINT | 自增主键 | 是 |
+| conversation_id | CHAR(36) | 业务会话 UUID（对外主键，唯一） | 是 |
 | user_id | VARCHAR(64) | 业务用户 ID | 是 |
-| platform_session_id | VARCHAR(128) | 火山 Session ID（唯一） | 是 |
-| agent_id | VARCHAR(128) | 创建会话时的 Agent 实例 ID | 否 |
-| agent_version | VARCHAR(32) | Agent 版本号（创建、查询会话返回，会话创建后全程不变） | 否 |
-| skill_version | VARCHAR(64) | 会话快照的 Skill 版本（若平台单独返回则记录；否则并入 agent_version 判定） | 否 |
+| platform | VARCHAR(32) | 平台 | 是 |
+| platform_session_id | VARCHAR(128) | 平台会话 ID | 是 |
 | is_default | TINYINT | 1 默认会话 / 0 临时会话 | 是 |
-| platform_status | VARCHAR(32) | 火山状态：idle / running / terminated | 是 |
+| platform_status | VARCHAR(32) | 平台状态归一化：idle / running / terminated | 是 |
 | biz_status | TINYINT | 0 活跃 / 1 已结束 / 2 只读（冻结） | 是 |
-| frozen_reason | VARCHAR(128) | 只读原因：agent_upgrade / skill_upgrade / credential_rotated 等 | 否 |
+| frozen_reason | VARCHAR(128) | 只读原因：config_changed / credential_rotated 等 | 否 |
 | frozen_at | DATETIME(3) | 置为只读的时间 | 否 |
+| config_snapshot | JSON | 结构化配置快照（我方 config hash + 平台版本辅助） | 否 |
+| platform_config | JSON | 平台会话差异字段（火山 agent_id/skill 版本等） | 否 |
 | title | VARCHAR(255) | 会话标题/摘要 | 否 |
-| credential_version | VARCHAR(64) | 本次注入的用户凭据版本（轮换重建用） | 否 |
 | created_at | DATETIME(3) | 创建时间 | 是 |
 | last_active_at | DATETIME(3) | 最后活跃时间 | 是 |
 | terminated_at | DATETIME(3) | 终止时间 | 否 |
 
-约束/索引：`UNIQUE(platform_session_id)`；`INDEX(user_id)`；`INDEX(user_id, is_default)`；「每用户唯一默认会话」由应用层保证 `is_default=1` 唯一。保留 `platform_status` 与 `biz_status` 两层：平台状态用于对接事件流，业务状态用于前端展示与清理；`credential_version` 用于识别凭据轮换前的旧会话。
+约束：`UNIQUE(conversation_id)`；`UNIQUE(platform, platform_session_id)`；`INDEX(user_id, is_default)`。
 
-会话升级只读语义：`biz_status=2` 表示该会话快照已过期（agent/skill 升级或凭据轮换），后端**禁止在该会话继续发送普通消息**，应引导用户新建默认会话。判定方式：每次收到新消息前，后端比对 `agent_version`（及 `skill_version`）与当前最新版本，不一致则将旧会话置 `biz_status=2` 并写 `frozen_reason`/`frozen_at`；只读会话保留历史可查、可归档，但不再接受新轮次。
+会话升级只读语义：`biz_status=2` 表示该会话快照已过期（agent/skill 升级或凭据轮换），后端**禁止继续发送普通消息**。判定：每次发消息前，用当前配置重算 `config_snapshot` 与会话快照比对，不一致则置 `biz_status=2` 并写 `frozen_reason`/`frozen_at`。
 
 #### 3.7.3 agent_call_log（调用审计，一次分析任务一行）
 | 字段 | 类型 | 说明 | 必填 |
 |---|---|---|---|
 | id | BIGINT | 自增主键（一轮任务一个，作为审计与文件关联的唯一标识） | 是 |
+| task_id | CHAR(36) | 业务任务 UUID（对外主键，唯一） | 是 |
+| conversation_id | CHAR(36) | 业务会话 UUID | 是 |
 | user_id | VARCHAR(64) | 业务用户 ID | 是 |
-| session_id | VARCHAR(128) | 火山 Session ID | 是 |
-| agent_id | VARCHAR(128) | Agent 实例 ID | 否 |
+| platform | VARCHAR(32) | 平台：volcano / bailian / tencent_adp | 是 |
+| platform_session_id | VARCHAR(128) | 平台会话 ID | 否 |
 | model | VARCHAR(64) | 模型标识（如 doubao-seed-2.1-turbo） | 否 |
 | status | TINYINT | 0 成功 / 1 失败 | 是 |
 | error_code | VARCHAR(64) | 错误码 | 否 |
@@ -451,29 +493,34 @@ flowchart TB
 | cache_creation_tokens | INT | 新增创建缓存 Token（平台 `cache_creation_input_tokens`，缓存存储计费，可选） | 否 |
 | total_tokens | INT | 总消耗 Token（`input_tokens + output_tokens + cache_read_tokens`） | 否 |
 | tool_call_count | INT | 内置工具调用次数 | 否 |
+| tool_fee | DECIMAL(12,6) | 工具 / MCP 调用费（平台差异，可空） | 否 |
 | running_duration_ms | INT | 运行时长（毫秒） | 否 |
 | cost | DECIMAL(12,6) | 折算费用（后算，可空） | 否 |
+| platform_usage | JSON | 平台特有用量/计费原始字段 | 否 |
 | started_at | DATETIME(3) | 开始时间 | 是 |
 | ended_at | DATETIME(3) | 结束时间 | 否 |
 
-约束/索引：主键 `id` 自增；`INDEX(user_id, started_at)`；`INDEX(session_id)`。Java 后端不做请求去重——用户每发送一条消息均由 Agent 完整执行并落一行记录，重复提交由 3.2.1 的同会话并发限制（排队或拒绝）兜底，不引入业务幂等键。火山计费为「Token + 运行时长 + 工具调用次数」三段，因此按火山 usage 拆分输入/输出/缓存命中/缓存创建四类 Token，并记录 `running_duration_ms`、`tool_call_count`，才能按官方单价回算 `cost`。`total_tokens` 按 `input_tokens + output_tokens + cache_read_tokens` 汇总；`cache_creation_tokens` 为缓存存储计费口径，最终计费以火山账单为准。`cost` 由后端统一计算，不直接采信模型/前端返回值。
+约束：`UNIQUE(task_id)`；`INDEX(user_id, started_at)`；`INDEX(platform, platform_session_id)`。Java 后端不做请求去重——用户每发送一条消息均由 Agent 完整执行并落一行记录，重复提交由 3.2.1 的同会话并发限制兜底。三平台统一用量模型：token 五列 + `running_duration_ms` + `tool_call_count` + `tool_fee`；平台计费差异（如百炼 MCP 费、腾讯 PU）进 `platform_usage`，`cost` 由后端按平台单价汇总回算。
 
 #### 3.7.4 agent_report_file（报告文件索引，30 天生命周期）
 | 字段 | 类型 | 说明 | 必填 |
 |---|---|---|---|
 | id | BIGINT | 自增主键 | 是 |
+| file_id | CHAR(36) | 业务文件 UUID（对外主键，唯一） | 是 |
 | call_log_id | BIGINT | 关联 `agent_call_log.id`（本轮任务） | 是 |
+| conversation_id | CHAR(36) | 业务会话 UUID | 是 |
 | user_id | VARCHAR(64) | 业务用户 ID | 是 |
-| session_id | VARCHAR(128) | 火山 Session ID | 是 |
+| platform | VARCHAR(32) | 平台 | 是 |
 | file_type | VARCHAR(16) | 文件类型（md/xlsx） | 否 |
 | file_name | VARCHAR(255) | 文件名 | 否 |
-| oss_path | VARCHAR(512) | 私有 TOS 归档路径 | 是 |
+| object_path | VARCHAR(512) | 归档对象路径（我方 OSS/TOS） | 是 |
+| platform_config | JSON | 平台文件引用（火山 file_id / 百炼 file_id / 腾讯引用） | 否 |
 | file_size | INT | 文件字节数 | 否 |
 | status | TINYINT | 0 有效 / 1 已过期删除 | 是 |
 | expire_at | DATETIME(3) | 到期时间（30 天） | 是 |
 | created_at | DATETIME(3) | 创建时间 | 是 |
 
-约束/索引：`INDEX(call_log_id)`；`INDEX(user_id, created_at)`；`INDEX(expire_at)`（清理任务用）；`INDEX(session_id)`。该表替换 3.3 中「历史文件索引放 Memory Store 单条 JSON」的写法，DB 作为文件索引真源，支持列表/分页/生命周期清理。文件登记方式：Java 后端在发送消息时先插入 `agent_call_log` 行取得自增 `id`，本轮 `session.status_idle` 后调用 `GET /files?scope_id={session_id}&purpose=agent` 轮询产物文件（Skill 写 `/mnt/session/outputs` 自动注册为 `purpose=agent`；同一 Session 不支持并发，发送→idle 时间窗内的新文件即归属本轮），以该 `id` 回填 `call_log_id`；一轮可登记多个文件（md/xlsx）。若 P0-1 结论需 30 天留存，再将文件归档私有 TOS 并写 `oss_path`；否则仅登记平台 file_id（默认存储 7 天）。
+约束：`UNIQUE(file_id)`；`INDEX(conversation_id, created_at)`；`INDEX(expire_at)`；`INDEX(call_log_id)`。该表作为文件索引真源，支持列表/分页/生命周期清理。文件登记经 `AgentPlatform.listArtifacts` 抽象：火山走 `GET /files?scope_id&purpose=agent`，百炼走 Files API，腾讯按其能力；归档统一到自有对象存储写 `object_path`，平台文件引用进 `platform_config`。
 
 #### 3.7.5 agent_event_log（会话事件流水，评估/审计用）
 > 用途：完整保存一轮会话的原始事件（用户消息、助手消息、工具调用与结果、状态变化），供事后评估、质量分析、复现与审计。与 `agent_call_log` 的差异：`agent_call_log` 是**按轮聚合**的统计行（成本/用量），本表是**按事件**的流水（保真时序）。
@@ -481,17 +528,20 @@ flowchart TB
 | 字段 | 类型 | 说明 | 必填 |
 |---|---|---|---|
 | id | BIGINT | 自增主键 | 是 |
-| session_id | VARCHAR(128) | 火山 Session ID | 是 |
+| platform | VARCHAR(32) | 平台 | 是 |
+| platform_session_id | VARCHAR(128) | 平台会话 ID | 是 |
+| conversation_id | CHAR(36) | 业务会话 UUID | 是 |
+| task_id | CHAR(36) | 业务任务 UUID | 否 |
 | call_log_id | BIGINT | 关联 `agent_call_log.id`（本轮任务；先到的事件可后回填，可空） | 否 |
 | event_id | VARCHAR(128) | SSE 事件 id（断点续传去重用，可空） | 否 |
 | seq | BIGINT | 会话内单调递增序号（事件到达顺序） | 是 |
-| event_type | VARCHAR(64) | 事件类型（`user.message` / `agent.message` / `agent.custom_tool_use` / `session.status_*` / `error` 等，以官方「会话事件类型」为准） | 是 |
+| event_type | VARCHAR(64) | **我方规范事件**：user_message / message / tool_call / tool_result / approval / turn_end / error | 是 |
 | role | VARCHAR(16) | user / assistant / tool（可空） | 否 |
 | content | JSON | 结构化内容（文本、工具名、参数、结果摘要等） | 否 |
 | raw_payload | JSON | 原始事件完整 JSON（保真，评估复现用） | 是 |
 | recorded_at | DATETIME(3) | 后端落库时间 | 是 |
 
-约束/索引：`UNIQUE(session_id, event_id)`（event_id 非空时）；`INDEX(session_id, seq)`；`INDEX(call_log_id)`。
+约束：`UNIQUE(platform, platform_session_id, event_id)`（event_id 非空时）；`INDEX(conversation_id, seq)`；`INDEX(task_id)`。
 
 **记录时机（关键）**：见 4.2 及官方「流式获取会话事件（SSE）」「Session 事件流总览」。
 - **逐事件落库，不等轮次结束**。助手文本会以 delta 流式推送，工具调用是长程调用（先工具开始、很久后才返回结果），只有在每个 SSE 事件到达时立即 append，才能保留真实时序与中间状态。
@@ -504,41 +554,44 @@ flowchart TB
 CREATE TABLE business_user_agent_binding (
   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   user_id VARCHAR(64) NOT NULL,
-  memory_store_id VARCHAR(128) NOT NULL,
-  vault_id VARCHAR(128) NULL,
+  platform VARCHAR(32) NOT NULL,
+  platform_config JSON NULL,
   status TINYINT NOT NULL DEFAULT 0,
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
-  UNIQUE KEY uk_user (user_id)
+  UNIQUE KEY uk_user_platform (user_id, platform)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE business_agent_session (
   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  conversation_id CHAR(36) NOT NULL,
   user_id VARCHAR(64) NOT NULL,
+  platform VARCHAR(32) NOT NULL,
   platform_session_id VARCHAR(128) NOT NULL,
-  agent_id VARCHAR(128) NULL,
-  agent_version VARCHAR(32) NULL,
-  skill_version VARCHAR(64) NULL,
   is_default TINYINT NOT NULL DEFAULT 0,
   platform_status VARCHAR(32) NOT NULL DEFAULT 'idle',
   biz_status TINYINT NOT NULL DEFAULT 0 COMMENT '0 活跃 / 1 已结束 / 2 只读(冻结)',
   frozen_reason VARCHAR(128) NULL,
   frozen_at DATETIME(3) NULL,
+  config_snapshot JSON NULL,
+  platform_config JSON NULL,
   title VARCHAR(255) NULL,
-  credential_version VARCHAR(64) NULL,
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   last_active_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   terminated_at DATETIME(3) NULL,
-  UNIQUE KEY uk_platform_session (platform_session_id),
+  UNIQUE KEY uk_conversation (conversation_id),
+  UNIQUE KEY uk_platform_session (platform, platform_session_id),
   KEY idx_user (user_id),
   KEY idx_user_default (user_id, is_default)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE agent_call_log (
   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  task_id CHAR(36) NOT NULL,
+  conversation_id CHAR(36) NOT NULL,
   user_id VARCHAR(64) NOT NULL,
-  session_id VARCHAR(128) NOT NULL,
-  agent_id VARCHAR(128) NULL,
+  platform VARCHAR(32) NOT NULL,
+  platform_session_id VARCHAR(128) NULL,
   model VARCHAR(64) NULL,
   status TINYINT NOT NULL DEFAULT 0,
   error_code VARCHAR(64) NULL,
@@ -549,35 +602,44 @@ CREATE TABLE agent_call_log (
   cache_creation_tokens INT NULL,
   total_tokens INT NULL,
   tool_call_count INT NULL,
+  tool_fee DECIMAL(12,6) NULL,
   running_duration_ms INT NULL,
   cost DECIMAL(12,6) NULL,
+  platform_usage JSON NULL,
   started_at DATETIME(3) NOT NULL,
   ended_at DATETIME(3) NULL,
+  UNIQUE KEY uk_task (task_id),
   KEY idx_user_time (user_id, started_at),
-  KEY idx_session (session_id)
+  KEY idx_platform_session (platform, platform_session_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE agent_report_file (
   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  file_id CHAR(36) NOT NULL,
   call_log_id BIGINT UNSIGNED NOT NULL,
+  conversation_id CHAR(36) NOT NULL,
   user_id VARCHAR(64) NOT NULL,
-  session_id VARCHAR(128) NOT NULL,
+  platform VARCHAR(32) NOT NULL,
   file_type VARCHAR(16) NULL,
   file_name VARCHAR(255) NULL,
-  oss_path VARCHAR(512) NOT NULL,
+  object_path VARCHAR(512) NOT NULL,
+  platform_config JSON NULL,
   file_size INT NULL,
   status TINYINT NOT NULL DEFAULT 0,
   expire_at DATETIME(3) NOT NULL,
   created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  UNIQUE KEY uk_file (file_id),
   KEY idx_call_log (call_log_id),
-  KEY idx_user_time (user_id, created_at),
-  KEY idx_expire (expire_at),
-  KEY idx_session (session_id)
+  KEY idx_conv_time (conversation_id, created_at),
+  KEY idx_expire (expire_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE agent_event_log (
   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  session_id VARCHAR(128) NOT NULL,
+  platform VARCHAR(32) NOT NULL,
+  platform_session_id VARCHAR(128) NOT NULL,
+  conversation_id CHAR(36) NOT NULL,
+  task_id CHAR(36) NULL,
   call_log_id BIGINT UNSIGNED NULL,
   event_id VARCHAR(128) NULL,
   seq BIGINT NOT NULL,
@@ -586,17 +648,17 @@ CREATE TABLE agent_event_log (
   content JSON NULL,
   raw_payload JSON NOT NULL,
   recorded_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-  UNIQUE KEY uk_event (session_id, event_id),
-  KEY idx_session_seq (session_id, seq),
-  KEY idx_call_log (call_log_id)
+  UNIQUE KEY uk_event (platform, platform_session_id, event_id),
+  KEY idx_conv_seq (conversation_id, seq),
+  KEY idx_task (task_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 ```
 
 #### 3.7.7 生命周期与清理
-- 会话：`business_agent_session.last_active_at` 超过阈值（结合平台 30 天沙箱回收）置 `biz_status=1` 或归档；agent/skill 升级置 `biz_status=2`（只读）而非删除，保留历史可查；用户离职同步清理。
+- 会话：`business_agent_session.last_active_at` 超过阈值置 `biz_status=1` 或归档；配置升级置 `biz_status=2`（只读）而非删除，保留历史可查；用户离职同步清理。
 - 审计：`agent_call_log` 按月分区/归档，保留周期与财务对账要求一致（建议 ≥90 天，待确认）。
 - 事件流水：`agent_event_log` 仅用于评估/审计，保留窗口建议与评估需求一致（≥90 天，待确认）；因含原始事件 payload，需权限管控与脱敏。
-- 文件：定时任务按 `agent_report_file.expire_at` 清理私有 TOS 对象并置 `status=1`，与 30 天生命周期一致。
+- 文件：定时任务按 `agent_report_file.expire_at` 清理对象存储并置 `status=1`，与 30 天生命周期一致。
 ---
 
 ## 四、接口与事件规范
@@ -620,7 +682,7 @@ implementation "com.volcengine:ark-runtime:0.6.0"
 > 源码仓库为 [volcengine/ark-runtime-java](https://github.com/volcengine/ark-runtime-java)（`<scm>` 已核实）。旧包名 `volcengine-java-sdk-ark-runtime`（位于 `volcengine/volcengine-java-sdk` 仓库）为旧版，不推荐新项目使用。
 
 #### 4.0.2 核心入口类
-- 平台 API（Agent/Environment/Session/Event/File/Memory/Vault/Skill/模型）：`com.volcengine.ark.runtime.service.ArkService`（其接口为 `ArkApi`，基于 Retrofit2 + RxJava，多数方法返回 `io.reactivex.Single<T>`，流式为 `retrofit2.Call<ResponseBody>`）。
+- 平台 API（Agent/Environment/Session/Event/File/Memory/Skill/模型）：`com.volcengine.ark.runtime.service.ArkService`（其接口为 `ArkApi`，基于 Retrofit2 + RxJava，多数方法返回 `io.reactivex.Single<T>`，流式为 `retrofit2.Call<ResponseBody>`）。
 - 自托管自定义工具 Worker：`com.volcengine.ark.runtime.selfhosted.SelfHostedClient`。
 
 #### 4.0.3 接口方法映射（原 Node 手写 HTTP → Java SDK）
@@ -636,7 +698,6 @@ implementation "com.volcengine:ark-runtime:0.6.0"
 | Agent | `createAgent(...)` / `getAgent(id)` / `updateAgent(...)` / `deleteAgent(id)` / `listAgentVersions(id)` | Agent 生命周期与版本 |
 | Environment | `createEnvironment(...)` / `getEnvironment(id)` / `updateEnvironment(...)` / `deleteEnvironment(id)` | 沙箱环境 |
 | Memory Store | `createMemoryStore(...)` / `createMemory(...)` / `listMemories(...)` / `updateMemory(...)` / `deleteMemory(...)` | 每用户记忆库 |
-| Vault（二期） | `createVault(...)` / `createCredential(...)` / `updateCredential(...)` / `deleteCredential(...)` | 凭据库 |
 | Skill | `createSkill(...)` / `getSkill(id)` / `openSkillContent(id, ...)` | 自定义 Skill 包 |
 | 模型推理（通用） | `createResponse(ResponsesRequest, ...)` / `streamResponse(...)` | 与普通在线推理共用 |
 
@@ -670,9 +731,11 @@ SDK 提供 `streamSessionEvents(sessionId)` 返回 Retrofit `Call<ResponseBody>`
 | 会话管理 | 发送用户事件 | 提交分析指令、中断任务 |
 | 事件流 | SSE Stream 接口 | 监听消息、Skill 调用、状态、文件等事件 |
 | 文件管理 | 获取文件下载链接 | 归档报告文件分发 |
-| 资源管理（二期） | 创建 Vault、写入/更新凭据 | 用户级凭据生命周期管理（Vault 迁移后启用） |
+
 
 ### 4.2 SSE 核心事件类型与处理逻辑
+> 本节为**火山适配器**视角的平台事件；接入层需把它们归一化为 4.3 的我方规范事件后再对外推送与落库。
+
 | 事件类型 | 触发时机 | 处理逻辑 |
 |---|---|---|
 | `agent.message` | Agent 生成文字回复 | 增量推送至前端 |
@@ -681,6 +744,19 @@ SDK 提供 `streamSessionEvents(sessionId)` 返回 Retrofit `Call<ResponseBody>`
 | `agent.custom_tool_use` | custom tool 开始执行（二期/回调链路） | 记录日志、前端展示执行状态 |
 
 > 说明：① 事件类型以官方「会话事件类型」文档为准，custom tool 事件带 `agent.` 前缀；② 方舟原生事件中未见 `file` 事件，产物文件在 `session.status_idle` 后通过 Files API 轮询获取：Skill 写入沙箱 `/mnt/session/outputs` 目录的文件会**自动注册到 Files API，用途标记为 `purpose=agent`**；`GET /files` 默认按 `purpose=user_data` 过滤（只返回用户上传文件），**必须显式带 `scope_id={session_id}&purpose=agent`**，否则返回空列表会误判为无产物；取到文件后更新索引并向前端提供下载链接；③ 后端向前端透出的 `error` 为归一化错误事件，非方舟原生事件名。
+
+### 4.3 我方规范事件与三平台映射（平台无关）
+| 我方规范事件 | 火山方舟 | 阿里百炼 | 腾讯 ADP（HTTP SSE） |
+|---|---|---|---|
+| `user_message` | `user.message` | `message`(role=user) | 请求侧 `POST /chat`（`request_ack` 为回执） |
+| `message` | `agent.message` | `message`(role=assistant) | `text.delta` / `text.replace` / `message.added`(Type=reply) |
+| `tool_call` | `agent.tool_use` / `agent.custom_tool_use` | `tool_call` / `mcp_call` | `message.added`(Type=tool_call, Status=processing) |
+| `tool_result` | `agent.tool_result` / `user.custom_tool_result` | `tool_call_output` / `mcp_call_output` | tool_call 消息 Status=success/failed，输出在 Contents |
+| `approval` | `session.status_idle`(requires_action) | `tool_approval_request` / `tool_approval_response` | `message.added`(Type=questionnaire)，作答走新请求 |
+| `turn_end` | `session.status_idle`(非 requires_action) | `session_status`(null/end_turn/retries_exhausted) | `response.completed` / `done` |
+| `error` | `error`（归一化） | `error` | `error` |
+
+> 注意：approval 的裁决回传方式三平台不同（火山同会话续跑、百炼 `tool_approval_response`、腾讯新请求），防腐层需抽象「交互型事件 + 续跑/裁决」，不能只做字段名映射。
 
 ---
 
@@ -708,7 +784,7 @@ SDK 提供 `streamSessionEvents(sessionId)` 返回 Retrofit `Call<ResponseBody>`
 ### 6.1 凭据安全
 - 一期：用户凭据经会话环境变量按用户隔离注入，仅沙箱内可读，不向前端暴露，日志/事件流不打印完整凭据
 - 凭据定期轮换，轮换后重建会话加载新凭据，留存更新审计记录
-- 二期（Vault）：一用户一 Vault，密钥只写不可读，出站网关替换，沙箱/事件流/日志不出现明文；迁移前需完成 3.4.2 的 POC 验证
+
 - 最小权限原则：仅注入业务接口调用所必需的凭据
 
 ### 6.2 数据安全
@@ -731,7 +807,7 @@ SDK 提供 `streamSessionEvents(sessionId)` 返回 Retrofit `Call<ResponseBody>`
 | Agent 沙箱运行时 | 人均每日 2 次分析，单次平均 5 分钟 running | 约 2500 元 |
 | 模型推理 Token | 单次分析合计 10k token，使用 doubao-seed-2.1-turbo | 约 360 元 |
 | 工具调用 | 自定义 Skill 无平台调用费 | 0 元 |
-| Memory Store（每用户单库）/ Vault（二期） | 公测阶段免费 | 0 元 |
+| Memory Store（每用户单库） | 公测阶段免费 | 0 元 |
 | 私有 TOS 归档存储 | 30天留存总量约 6GB，1.08 元/GB/月 | 约 7 元 |
 | **总计** | - | **约 2870 元/月** |
 
@@ -762,7 +838,7 @@ SDK 提供 `streamSessionEvents(sessionId)` 返回 Retrofit `Call<ResponseBody>`
 5.  **存储精简**：报告文件控制大小，30天自动清理，避免无效存储堆积
 
 ### 7.4 资源生命周期管理
-- **用户维度**：用户离职/失效时，同步清理对应 Memory Store、历史会话（二期接入 Vault 后同步清理 Vault）
+- **用户维度**：用户离职/失效时，同步清理对应 Memory Store、历史会话
 - **会话维度**：长期闲置会话保留 session 对象，沙箱自动回收，不产生费用
 - **文件维度**：私有 TOS 配置30天生命周期，到期自动删除，同步清理索引
 - **规则维度**：业务侧配置源保留最近 3 版规则，历史版本定期清理
@@ -784,7 +860,7 @@ SDK 提供 `streamSessionEvents(sessionId)` 返回 Retrofit `Call<ResponseBody>`
 ### 8.3 排障路径
 1.  按 `session_id` 拉取完整会话事件流，定位失败节点
 2.  查看对应 Skill 执行日志，定位代码/参数/接口问题
-3.  核对 Memory Store、TOS 资源挂载与权限配置，以及会话环境变量注入（二期含 Vault）
+3.  核对 Memory Store、TOS 资源挂载与权限配置，以及会话环境变量注入
 4.  核查模型调用与限流情况
 5.  规则异常时核对业务侧规则配置源的版本与内容
 
@@ -792,7 +868,7 @@ SDK 提供 `streamSessionEvents(sessionId)` 返回 Retrofit `Call<ResponseBody>`
 
 ## 九、方案落地实施建议
 1.  **一期优先落地核心链路**：用户会话管理 + 每用户 Memory Store + 会话环境变量凭据 + leyosys 取数 Skill（已开发完成，直接接入）+ 取数结果对话/文件交付与 TOS 归档，验证主流程通畅；**不含分析 Skill 与规则配置源**
-2.  **二期扩展能力**：分析引擎 Skill（会话共享目录 `data_path` 接入，见 3.1.3）+ 规则热更新（业务侧配置源实时拉取）、Vault 凭据库迁移（同步改造 leyosys/Skill）、精细化权限、历史查询与归档管理
+2.  **二期扩展能力**：分析引擎 Skill（会话共享目录 `data_path` 接入，见 3.1.3）+ 规则热更新（业务侧配置源实时拉取）、精细化权限、历史查询与归档管理
 3.  **灰度验证**：先小范围用户试点，验证性能、成本、稳定性后全量推广
 4.  **预案准备**：提前准备平台异常降级方案，核心业务场景配置备用调用路径
 
