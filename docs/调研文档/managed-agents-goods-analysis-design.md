@@ -602,7 +602,7 @@ CREATE TABLE agent_event_log (
 ## 四、接口与事件规范
 
 ### 4.0 Java SDK（ark-runtime）对接说明
-> 接入层采用火山方舟 Managed Agents 官方 Java SDK **`ark-runtime`**（V3 接口体系），替代原 Node.js 手写 HTTP 实现。方法签名与版本以 [Maven Central](https://central.sonatype.com/artifact/com.volcengine/ark-runtime) 及官方 SDK 文档为准，上线前 POC 复核。
+> 接入层采用火山方舟 Managed Agents 官方 Java SDK **`ark-runtime`**（V3 接口体系），替代原 Node.js 手写 HTTP 实现。下述类名/方法名已通过 `ark-runtime 0.6.0`（2026-09-09 Maven Central 最新版）反编译核实；版本升级后以 [Maven Central](https://central.sonatype.com/artifact/com.volcengine/ark-runtime) 及官方 SDK 文档为准。
 
 #### 4.0.1 依赖坐标
 **Maven**
@@ -610,39 +610,47 @@ CREATE TABLE agent_event_log (
 <dependency>
     <groupId>com.volcengine</groupId>
     <artifactId>ark-runtime</artifactId>
-    <version>最新稳定版本号</version>
+    <version>0.6.0</version>
 </dependency>
 ```
 **Gradle**
 ```gradle
-implementation "com.volcengine:ark-runtime:最新版本号"
+implementation "com.volcengine:ark-runtime:0.6.0"
 ```
 > 旧包名 `volcengine-java-sdk-ark-runtime` 不推荐新项目使用。
 
 #### 4.0.2 核心入口类
-- 通用模型调用：`com.volcengine.ark.runtime.service.ArkService`
-- 自托管自定义工具：`com.volcengine.ark.runtime.selfhosted.SelfHostedClient`
+- 平台 API（Agent/Environment/Session/Event/File/Memory/Vault/Skill/模型）：`com.volcengine.ark.runtime.service.ArkService`（其接口为 `ArkApi`，基于 Retrofit2 + RxJava，多数方法返回 `io.reactivex.Single<T>`，流式为 `retrofit2.Call<ResponseBody>`）。
+- 自托管自定义工具 Worker：`com.volcengine.ark.runtime.selfhosted.SelfHostedClient`。
 
 #### 4.0.3 接口方法映射（原 Node 手写 HTTP → Java SDK）
-| 能力 | Java SDK 方法（示意） | 说明 |
+| 能力 | 实际 SDK 方法（ArkService / ArkApi） | 说明 |
 |---|---|---|
-| 创建会话 | `arkService.createSession(agentId, environmentId, ...)` | 挂载 Memory Store / 私有 TOS，经 `environment_with_overrides` 注入用户凭据环境变量 |
-| 发送消息 | `arkService.sendMessage(sessionId, ...)` | 支持流式 / 非流式 |
-| 回传自定义工具结果 | `arkService.postCustomToolResult(sessionId, toolCallId, result)` | 对应 `user.custom_tool_result` 回调 |
-| 结束 / 删除会话 | `arkService.terminateSession(sessionId)` | 归档 / 清理 |
-| 模型推理（通用） | `arkService.createResponse(...)` | 与普通在线推理共用 |
+| 创建会话 | `createSession(CreateSessionRequest, headers)` → `Single<Session>` | 请求内带 agent、environment、resources（挂 Memory Store/私有 TOS）与 `environment_with_overrides`（注入用户凭据） |
+| 查询 / 更新 / 删除会话 | `getSession(id)` / `updateSession(id, UpdateSessionRequest)` / `deleteSession(id)` | **无 `terminateSession`**，归档/清理用 `deleteSession`（或按平台语义 `updateSession`） |
+| 发送用户事件（消息 / 中断 / 工具结果） | `sendSessionEvents(sessionId, SendSessionEventsRequest, headers)` → `Single<SendSessionEventsResponse>` | **无 `sendMessage`**；用户消息、`user.interrupt`、`user.custom_tool_result` 均经此接口提交 |
+| 订阅会话事件流（SSE） | `streamSessionEvents(sessionId, headers)` → `Call<ResponseBody>` | 返回原始响应体，需自行解析 SSE 帧 |
+| 会话事件历史 | `listSessionEvents(sessionId, ...)` | 断线补偿 / 回溯 |
+| 会话资源挂载 | `createSessionResource(sessionId, CreateSessionResourceRequest)` / `listSessionResources(sessionId)` | 运行时挂/卸文件 |
+| 文件 | `uploadFile(...)` / `retrieveFile(id)` / `listFiles(...)` / `deleteFile(id)` | 产物发现与分发 |
+| Agent | `createAgent(...)` / `getAgent(id)` / `updateAgent(...)` / `deleteAgent(id)` / `listAgentVersions(id)` | Agent 生命周期与版本 |
+| Environment | `createEnvironment(...)` / `getEnvironment(id)` / `updateEnvironment(...)` / `deleteEnvironment(id)` | 沙箱环境 |
+| Memory Store | `createMemoryStore(...)` / `createMemory(...)` / `listMemories(...)` / `updateMemory(...)` / `deleteMemory(...)` | 每用户记忆库 |
+| Vault（二期） | `createVault(...)` / `createCredential(...)` / `updateCredential(...)` / `deleteCredential(...)` | 凭据库 |
+| Skill | `createSkill(...)` / `getSkill(id)` / `openSkillContent(id, ...)` | 自定义 Skill 包 |
+| 模型推理（通用） | `createResponse(ResponsesRequest, ...)` / `streamResponse(...)` | 与普通在线推理共用 |
 
-> 说明：上表方法名为 SDK 能力映射，入参/返回字段以官方 SDK 实际签名为准。
+> 说明：原初稿中的 `sendMessage`、`postCustomToolResult`、`terminateSession` 均不存在，已按 SDK 实际签名改为上表方法。
 
 #### 4.0.4 SSE 事件监听
-官方 SDK 未封装高层 SSE 客户端，接入层基于 **OkHttp（SDK 底层依赖）+ `okhttp-sse`** 建立单会话事件流连接：
-- 端点：`{baseUrl}/sessions/{sessionId}/events/stream`，Header `Authorization: Bearer {apiKey}`；
+SDK 提供 `streamSessionEvents(sessionId)` 返回 Retrofit `Call<ResponseBody>`，但**不负责解析 SSE 帧**；接入层基于 OkHttp（SDK 底层依赖）解析响应体中的 `text/event-stream`：
+- 端点由 SDK 封装（等价 `{baseUrl}/sessions/{sessionId}/events/stream`），Header `Authorization: Bearer {apiKey}`；
 - 监听并分发 `agent.message`、`agent.custom_tool_use`、`span.model_request_end`、`session.status_idle`、`error` 等事件（见 4.2）；
-- 断线重连用 SSE `id` / `Last-Event-ID` 续传，事件去重由 `agent_event_log.event_id` 唯一约束兜底。
+- 断线重连用 SSE `id` / `Last-Event-ID` 续传；历史补偿用 `listSessionEvents`；事件去重由 `agent_event_log.event_id` 唯一约束兜底。
 
 #### 4.0.5 自定义工具两条路径
-1. **一期：沙箱内自定义 Skill**（leyosys 取数，已在 Skill 内闭环鉴权/取数）——不走 `SelfHostedClient`，后端仅经 `ArkService` 管理会话、发送消息、监听事件；Skill 在沙箱内直连 leyosys。
-2. **二期/回调链路：自托管 Worker（`SelfHostedClient`）**——当工具需由业务后端执行（如分析 Skill 改为 custom_tool）时启用，官方原生推荐，可免自行解析 SSE 事件；收到 `agent.custom_tool_use` 后执行并 `postCustomToolResult` 回传。
+1. **一期：沙箱内自定义 Skill**（leyosys 取数，已在 Skill 内闭环鉴权/取数）——不走 `SelfHostedClient`，后端仅经 `ArkService` 管理会话、`sendSessionEvents` 发消息、`streamSessionEvents` 监听事件；Skill 在沙箱内直连 leyosys。
+2. **二期/回调链路：自托管 Worker（`SelfHostedClient`）**——当工具需由业务后端执行（如分析 Skill 改为 custom_tool）时启用。其核心接口为 `pollWork` / `ackWork` / `heartbeatWork` / `stopWork`（领取与确认工单）、`sendEvent` / `openEventStream`（收发会话事件）、`Tool.execute(input, ToolContext)`（业务工具实现）；**回传结果走 `sendEvent` / `sendSessionEvents` 的 `user.custom_tool_result` 事件，无 `postCustomToolResult` 方法**。
 
 #### 4.0.6 Token 用量累计
 - 一轮任务内每次模型请求由 `span.model_request_end` 事件返回 usage（input / output / cache_read / cache_creation）；
