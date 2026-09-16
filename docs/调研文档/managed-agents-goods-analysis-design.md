@@ -617,7 +617,7 @@ CREATE TABLE agent_event_log (
 ```gradle
 implementation "com.volcengine:ark-runtime:0.6.0"
 ```
-> 旧包名 `volcengine-java-sdk-ark-runtime` 不推荐新项目使用。
+> 源码仓库为 [volcengine/ark-runtime-java](https://github.com/volcengine/ark-runtime-java)（`<scm>` 已核实）。旧包名 `volcengine-java-sdk-ark-runtime`（位于 `volcengine/volcengine-java-sdk` 仓库）为旧版，不推荐新项目使用。
 
 #### 4.0.2 核心入口类
 - 平台 API（Agent/Environment/Session/Event/File/Memory/Vault/Skill/模型）：`com.volcengine.ark.runtime.service.ArkService`（其接口为 `ArkApi`，基于 Retrofit2 + RxJava，多数方法返回 `io.reactivex.Single<T>`，流式为 `retrofit2.Call<ResponseBody>`）。
