@@ -626,9 +626,9 @@ implementation "com.volcengine:ark-runtime:0.6.0"
 #### 4.0.3 接口方法映射（原 Node 手写 HTTP → Java SDK）
 | 能力 | 实际 SDK 方法（ArkService / ArkApi） | 说明 |
 |---|---|---|
-| 创建会话 | `createSession(CreateSessionRequest, headers)` → `Single<Session>` | 请求内带 agent、environment、resources（挂 Memory Store/私有 TOS）与 `environment_with_overrides`（注入用户凭据） |
+| 创建会话 | `createSession(CreateSessionRequest, headers)` → `Single<Session>` | `agent` 用 `AgentIdentifier`；`resources` 挂 Memory Store / 私有 TOS；**用户凭据注入在 `environment.config.env`**（`EnvironmentConfigOverride.env` 的 `Map<String,String>`），非顶层字段 |
 | 查询 / 更新 / 删除会话 | `getSession(id)` / `updateSession(id, UpdateSessionRequest)` / `deleteSession(id)` | **无 `terminateSession`**，归档/清理用 `deleteSession`（或按平台语义 `updateSession`） |
-| 发送用户事件（消息 / 中断 / 工具结果） | `sendSessionEvents(sessionId, SendSessionEventsRequest, headers)` → `Single<SendSessionEventsResponse>` | **无 `sendMessage`**；用户消息、`user.interrupt`、`user.custom_tool_result` 均经此接口提交 |
+| 发送用户事件（消息 / 中断 / 工具结果） | `sendSessionEvents(sessionId, SendSessionEventsRequest, headers)` → `Single<SendSessionEventsResponse>` | **无 `sendMessage`**；`SendSessionEventsRequest.events` 为 `List<ManagedAgentsEventParams>`，分别用 `ManagedAgentsUserMessageEventParams` / `ManagedAgentsUserInterruptEventParams` / `ManagedAgentsUserCustomToolResultEventParams` 提交 |
 | 订阅会话事件流（SSE） | `streamSessionEvents(sessionId, headers)` → `Call<ResponseBody>` | 返回原始响应体，需自行解析 SSE 帧 |
 | 会话事件历史 | `listSessionEvents(sessionId, ...)` | 断线补偿 / 回溯 |
 | 会话资源挂载 | `createSessionResource(sessionId, CreateSessionResourceRequest)` / `listSessionResources(sessionId)` | 运行时挂/卸文件 |
@@ -655,6 +655,12 @@ SDK 提供 `streamSessionEvents(sessionId)` 返回 Retrofit `Call<ResponseBody>`
 #### 4.0.6 Token 用量累计
 - 一轮任务内每次模型请求由 `span.model_request_end` 事件返回 usage（input / output / cache_read / cache_creation）；
 - 后端在轮内累加 N 次 usage，轮次结束（`session.status_idle`，非 `requires_action`）写入 `agent_call_log` 一行汇总（见 3.7.3）。
+
+#### 4.0.7 关键模型字段（已反编译核实，编码时直接对应）
+- **凭据注入**：`CreateSessionRequest.environment`（`EnvironmentWithOverrides`）→ `.config`（`EnvironmentConfigOverride`）→ `.env(Map<String,String>)`，对应一期「会话环境变量注入用户凭据」；`EnvironmentConfigOverride` 另含 `packages` / `networking` / `setupScript` / `tos`。
+- **资源挂载**：`CreateSessionRequest.resources` 为 `List<SessionResource>`；`SessionResource` 支持 `type`（file / memory_store / tos 等）、`memoryStoreId`、`fileId`、`access`（只读/读写）、`mountPath`、`tosBucket` / `tosKey` / `tosRegion`。据此：Memory Store 用 `type=memory_store + memoryStoreId + access=read_only`；私有 TOS 用 `type=tos + tosBucket/tosKey/tosRegion`。
+- **会话事件提交**：`SendSessionEventsRequest.events` 为事件参数列表，一期实际用到 `ManagedAgentsUserMessageEventParams`（发用户消息）、`ManagedAgentsUserInterruptEventParams`（中断）；二期 custom tool 回传用 `ManagedAgentsUserCustomToolResultEventParams`。
+- **事件流解析**：`streamSessionEvents` 返回原始 `ResponseBody`，事件对象含 `ManagedAgentsStartEvent` / `ManagedAgentsDeltaEvent` / `ManagedAgentsSessionEvent` 等，接入层按事件 `type` 分发（具体事件枚举以 SDK 当前版本为准，仍需与 4.2 的实测事件名对齐）。
 
 ### 4.1 平台侧核心 API 清单（Java 后端调用）
 | 类别 | 接口 | 用途 |
