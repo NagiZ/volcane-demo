@@ -342,14 +342,14 @@ public interface AgentPlatform {
 #### 3.4.1 三平台实测结论（已核对官方文档）
 - **火山**：✅ 创建会话时经 `environment.config.env`（`EnvironmentConfigOverride.env`，`Map<String,String>`）注入环境变量，Skill 沙箱内读取；已由 SDK 源码核实。
 - **百炼**：✅ `POST /sessions` 请求体字段 `environment_variables`（object，字符串键值对，**沙箱代码中可直接按名读取**）；响应也会返回 `environment_variables`。已核实。另有 `vault_ids` 字段（本方案不用 Vault）。
-- **腾讯 ADP**：⚠️ 无「创建会话注入环境变量」能力，但**多会话/多用户隔离不受影响**——`ConversationId` 由外部传入（UUID，每个用户端会话一个），`VisitorId` 唯一标识用户。有**应用级「参数变量」**（`CreateVariable`，AppId 级，官方示例标题称“创建环境变量”，作用域是应用不是会话）与**对话级 `CustomVariables`**（每次对话传）。→ per-user token 放 `CustomVariables` 随对话传，或后端持有型；应用级参数变量不适合 per-user token。
+- **腾讯 ADP**：⚠️ 无「创建会话注入环境变量」能力，但**多会话/多用户隔离不受影响**——`ConversationId` 由外部传入（UUID，每个用户端会话一个），`VisitorId` 唯一标识用户。有**应用级「参数变量」**（`CreateVariable`，AppId 级，官方示例标题称“创建环境变量”，作用域是应用不是会话）与**对话级 `CustomVariables`**（每次对话传）。→ **per-user token 统一走对话级 `CustomVariables` 随每次对话传**；后端持有型仅作兜底。
 
 结论：**火山、百炼都支持创建会话注入环境变量**；腾讯 ADP 无会话级环境变量，走 `CustomVariables` 或后端持有型。由 `CredentialProvider` 适配。
 
 #### 3.4.2 CredentialProvider 抽象
 - **注入型**（火山 / 百炼）：火山写 `environment.config.env`，百炼写 `environment_variables`，随 `createSession` 提交。
-- **对话变量型**（腾讯）：token 写入对话请求 `CustomVariables`，随每次对话提交。
-- **后端持有型**（百炼/腾讯兜底）：token 不注入沙箱，取数走 MCP/回调，由后端持 token 调业务接口。
+- **对话变量型**（腾讯，默认）：token 写入对话请求 `CustomVariables`，随每次对话提交。
+- **后端持有型**（兜底）：token 不注入沙箱，取数走 MCP/回调，由后端持 token 调业务接口。
 
 #### 3.4.3 安全边界
 - token 仅对当前用户会话可见（环境变量/对话变量），按用户隔离；不向前端暴露，日志/事件流不打印完整 token。
