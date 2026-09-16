@@ -1,10 +1,11 @@
 # 火山引擎 Managed Agents 商品异常分析Agent 技术方案
-> **版本**：V1.6（评审修订稿）
-> **V1.3 修订**：① **一期不做分析（规则执行引擎）Skill**，诊断分析能力整体后移二期；一期链路为「指令理解 → leyosys 取数 Skill（鉴权/接口选择已在 Skill 内闭环）→ 结果对话/文件交付」。② **明确多 Skill 大数据传递机制（见 3.1.3）**：同会话多 Skill 的沙箱本地文件系统不互通、也不能编程互调；大数据经**会话共享目录约定路径**中转——取数 Skill 写共享目录、返回值带路径，Agent 将路径作为显式入参传给分析 Skill，分析 Skill 定义路径入参读文件，数据本身不过模型上下文。
+> **版本**：V1.7（评审结论稿）
+> **V1.3 修订（历史口径，已被 V1.7 取代）**：① 一期不做分析（规则执行引擎）Skill，诊断分析能力整体后移二期；当时一期链路为「指令理解 → leyosys 取数 Skill → 结果对话/文件交付」。② 明确多 Skill 大数据传递机制（见 3.1.3）：同会话多 Skill 的沙箱本地文件系统不互通、也不能编程互调；大数据经会话共享目录约定路径中转，数据本身不过模型上下文。
 > **V1.4 修订**：① 完善 `business_agent_session` 支持「会话升级只读」——新增 `biz_status=2`、`skill_version`、`frozen_reason`、`frozen_at`；② 新增 `agent_event_log` 会话事件流水表，逐事件落库保存消息与工具调用，用于评估/审计。
 > **V1.5 修订**：接入层由 Node.js 自研后端改为 **Java 自研后端（火山官方 `ark-runtime` SDK）**；新增 4.0「Java SDK（ark-runtime）对接说明」，并将全文「Node 后端」统一替换为「Java 后端」（Skill 内部的 `Node 子进程` 描述保留，指既有 Skill 实现细节）。
 > **V1.6 修订**：技术方案平台解耦。① 对外只暴露业务接口，隐藏平台概念；② 接入层引入 `AgentPlatform` 防腐层，火山为首个实现，预留百炼/腾讯 ADP；③ 四张表加 `platform`/`platform_config`/`config_snapshot`，主键改 UUID，`tool_fee` 单列；④ 移除 Vault/凭据库，统一为「创建会话时注入环境变量」管控 token；⑤ 新增三平台事件映射与规范事件枚举。
-> **更新说明**：V1.1 修订：① 一期鉴权改用会话环境变量注入，Vault 调整为二期进阶方案（需同步改造 leyosys/Skill）；② Memory Store 改为每用户独立单库，全局规则改由业务侧配置源实时拉取；③ 修正 SSE 事件语义（custom_tool 前缀、requires_action、file/error 事件），补充单会话并发限制与成本假设出处。仍保留：leyosys 用户级鉴权、规则全量热更新不中断会话、报告法定留存 30 天、单次单用户数据≤10MB、约 1000 名内部用户。
+> **V1.7 修订**：完成关键评审决策。① 一期不直接取数、不生成文件，改为生成结构化查询条件；② 同一会话任务未结束时直接拒绝，允许创建临时独立会话并行处理，并发状态使用 Redis 锁；③ 依据官方文档确认 `span.model_request_end.model_usage` 字段、Custom Tool 事件与 `requires_action` 续跑机制；④ 审计数据永久保存并直接入库；⑤ 移除预付费成本估算，Managed Agents 按后付费账单口径管理。
+> **更新说明**：V1.1 修订：① 一期鉴权改用会话环境变量注入，Vault 调整为二期进阶方案（需同步改造 leyosys/Skill）；② Memory Store 改为每用户独立单库，全局规则改由业务侧配置源实时拉取；③ 修正 SSE 事件语义（custom_tool 前缀、requires_action、file/error 事件），补充单会话并发限制与成本假设出处。V1.7 起，一期不再直接取数、不生成文件，历史留存与数据量约束仅作为二期预留口径。
 > **V1.2 修订**：新增 3.7 数据表结构设计（`business_user_agent_binding` / `business_agent_session` / `agent_call_log` / `agent_report_file` 四张表）；历史分析文件索引由 Memory Store 迁至 `agent_report_file` 表，Memory Store 仅保留用户偏好与权限标识。
 > **方案边界**：本方案仅覆盖火山引擎 Managed Agents 平台侧的对接设计、Agent 配置、Skill 集成、资源管理、会话与事件处理，不包含 leyosys 业务系统本身、业务规则引擎的后端开发与运维。
 
@@ -12,65 +13,53 @@
 
 ## 怎么读本文档
 
-- **先看「待确认项清单」**：P0 决定编码前必须敲定，P1/P2/P3 不影响主线通读。
+- **先看「评审结论清单」**：P0/P1/P2 已确认，P3 属二期 POC。
 - **再读「二、整体架构与核心链路」**建立全局；实现细节看三、四，可靠/安全/成本/运维按需看五~八，落地节奏看九。
 - **阶段约定**：正文以「一期 / 二期」标注交付阶段；架构图中虚线表示二期能力。
 
-## 待确认项清单（评审决策用 · 先读）
-> 每项按「设计目的（解决什么问题）→ 为何待确认 → 需确认的因素」列出。**P0 不定不编码；P1 不挡编码、上线前必须验完；P2 为内部业务/商务确认，不阻塞技术开发；P3 属二期。**
+## 评审结论清单（2026-09-16）
+> 原待确认项已逐项澄清。P0/P1/P2 结论如下；P3 仍属二期 POC。
 
 ### P0：编码前必须确定
 
-#### P0-1 一期取数结果文件是否需要 30 天留存（决定挂不挂私有 TOS）
-- **设计目的**：私有 TOS 方案要解决的问题只有一个——文件在沙箱回收/平台默认存储 7 天删除之后仍可下载，满足 30 天留存与历史追溯。
-- **为何待确认**：30 天的依据是「分析报告法定留存」，一期不做分析、产物是取数结果 Excel，该留存要求是否适用于取数文件尚未经合规确认；这直接决定一期要不要挂 TOS。
-- **需确认的因素**：
-  1. 合规/法务：取数结果文件是否属于法定留存范围、留存多久；
-  2. 业务方：即便不法定，是否仍要求 N 天历史回溯下载，N 取多少；
-  3. 结论为「7 天内即可」→ 用平台默认存储（产物发现链路已确认：写 `/mnt/session/outputs`、`GET /files` 带 `purpose=agent`，见 4.2），砍掉桶挂载/归档/清理任务；结论为「需 30 天」→ 保留 3.5 方案，并补验挂载 TOS 目录是否同样注册到 Files API（若否则 Java 后端直接列举桶对象取 `oss_path`）。
+#### P0-1 一期文件留存与私有 TOS（已确认）
+- **结论**：一期不直接取数、不生成结果文档，因此不做文件落盘，不挂载私有 TOS，不建设归档与清理任务。
+- **一期交付**：Agent 仅生成结构化查询条件与解释说明，供用户复制或带到业务系统执行。
+- **二期预留**：若后续需要真实取数、分析报告或文件交付，再重新评审文件生命周期与对象存储方案。
 
-#### P0-2 同一 Session 并发请求的处理策略
-- **设计目的**：平台约束同一 Session 不能并发处理两条消息，后端必须决定用户在上一任务未结束时再发消息怎么办，防止平台报错或请求互相覆盖（3.2.1）。
-- **为何待确认**：「排队」与「拒绝」对应两套完全不同的 Java 实现（队列+状态机+超时通知 vs 前置状态校验直接返回）和前端交互，属产品决策，不能由开发自行选择。
-- **需确认的因素**：
-  1. 产品取舍：排队等待（队列长度、排队超时、前端提示）还是直接拒绝（"上一任务进行中"）；
-  2. 是否允许为同用户创建临时独立会话做并行分析（上下文不复用的代价是否接受）；
-  3. 并发状态的落点：`business_agent_session.platform_status` + 行锁，还是 Redis 锁。
+#### P0-2 同一 Session 并发请求策略（已确认）
+- **结论**：同一会话上一任务未结束时，新消息直接拒绝，返回“上一任务进行中”，不做排队。
+- **并行策略**：允许用户创建临时独立会话并行分析；临时会话不继承默认会话上下文，仅复用用户级配置与凭据。
+- **实现口径**：并发互斥使用 Redis 锁；锁 key 以 `conversation_id` 为粒度，任务最终态或服务异常时通过 TTL 兜底释放。
 
 ### P1：不挡编码，上线前必须验证（字段/事件映射级）
 
-#### P1-1 `span.model_request_end` 的 usage / request_id 字段结构与累加口径
-- **设计目的**：一轮任务含 N 次模型请求，Java 后端需把 N 份 usage 累加为一行汇总落 `agent_call_log`，用于成本回算与账单对账（3.7.0）。
-- **为何待确认**：事件名称与「一轮 N 次、成对下发」已由实测确认，但事件体内 usage、request_id 的**准确字段名与层级**未以官方文档逐字核实（外网受限）；属映射层风险，不影响表结构。
-- **需确认的因素**：
-  1. usage 四字段的准确名称/层级（input/output/cache_read/cache_creation）；
-  2. request_id 字段位置，确认其确为单次模型请求粒度（不落库、仅对账回查）；
-  3. N 次累加的边界（以哪些事件界定一轮）。
+#### P1-1 `span.model_request_end` 的 usage / request_id 字段结构（已核对官方文档）
+- **官方字段**：`span.model_request_end` 携带 `model_usage`，字段为 `input_tokens`、`output_tokens`、`cache_creation_input_tokens`、`cache_read_input_tokens`、`speed`。
+- **request_id**：官方事件示例未携带 `request_id`；`request_id` 仅出现在通用 API 错误响应示例中，不能作为模型请求粒度对账标识。审计以事件 `id` 与 `model_request_start_id` 关联。
+- **累加边界**：从本轮 `user.message` 提交成功开始，到 `session.status_idle` 且 `stop_reason.type != requires_action` 结束；期间每个 `span.model_request_end.model_usage` 均累加到本轮 `agent_call_log`。
 
-#### P1-2 官方会话事件类型清单复核
-- **设计目的**：事件解析、任务收口（只认真正的 `session.status_idle`，`requires_action` 不算结束）、工具计数与错误归一化（4.2）。
-- **为何待确认**：当前事件名与语义来自调研项目实测记录，非官方文档原文，需在编码对接前以官方「会话事件类型」文档逐字复核。
-- **需确认的因素**：custom tool 事件前缀、`requires_action` 语义与续跑方式、error 事件的归一化口径。
+#### P1-2 官方会话事件类型清单复核（已核对官方文档）
+- **事件域**：官方事件类型遵循 `{domain}.{action}`，包含 User、Agent、Session、Span 域。
+- **核心类型**：`user.message`、`user.interrupt`、`user.tool_confirmation`、`agent.message`、`agent.thinking`、`agent.tool_use`、`agent.tool_result`、`agent.mcp_tool_use`、`agent.mcp_tool_result`、`agent.custom_tool_use`、`user.custom_tool_result`、`session.status_running`、`session.status_idle`、`session.status_rescheduled`、`session.status_terminated`、`session.error`、`session.deleted`、`session.updated`、`span.model_request_start`、`span.model_request_end`。
+- **其他官方类型**：`user.define_outcome`、`agent.thread_message_sent`、`agent.thread_message_received`、`agent.thread_context_compacted`、`session.thread_created`、`session.thread_status_running`、`session.thread_status_idle`、`session.thread_status_rescheduled`、`session.thread_status_terminated`、`span.outcome_evaluation_start`、`span.outcome_evaluation_ongoing`、`span.outcome_evaluation_end`。一期主链路不依赖这些类型，但适配层需保留未知事件透传与原始落库能力。
+- **Custom Tool**：工具调用事件为 `agent.custom_tool_use`；随后 `session.status_idle` 携带 `stop_reason.type=requires_action` 与 `stop_reason.event_ids`，业务侧按 `custom_tool_use_id` 回传 `user.custom_tool_result`，多个阻塞事件建议放在同一 `events` 数组；全部处理完成后 Session 切回 running。
+- **任务收口**：仅 `session.status_idle` 且非 `requires_action` 可视为本轮结束；错误原生事件为 `session.error`，接入层归一化为我方 `error`。
 
 ### P2：内部业务/商务确认（不阻塞开发）
 
-#### P2-1 `agent_call_log` 审计保留周期
-- **设计目的**：确定审计表按月分区/归档策略与存储容量（3.7.6）。
-- **为何待确认**：保留周期取决于财务对账与合规要求，技术侧不能自定。
-- **需确认的因素**：保留月数（建议 ≥90 天）、是否按月分区、归档介质与查询方式。
+#### P2-1 审计保留周期（已确认）
+- **结论**：`agent_call_log` 与 `agent_event_log` 均直接写入业务数据库，永久保存，不做按月分区到期清理或外部归档删除。
+- **治理要求**：按用户、会话、任务维度权限管控；如未来数据量影响查询，可增加只读归档库或索引优化，但默认不删除审计数据。
 
-#### P2-2 成本单价核对
-- **设计目的**：7.1 月度成本测算作为立项/采购输入，数字不能是臆测值。
-- **为何待确认**：TOS（0.0015 元/GB/时）、模型 token、沙箱（0.5 元/时）单价均需以官方价目页/购买页为准。
-- **需确认的因素**：三项官方现价、缓存 token 折扣单价、ArkClaw 席位当期报价与最低 5 席规则。
+#### P2-2 成本单价核对（已确认）
+- **结论**：删除月度成本估算与 ArkClaw 预付费席位测算；Managed Agents 采用后付费模式，以火山账单为准。
+- **技术口径**：`agent_call_log` 保存平台返回的 token、缓存 token、运行时长与原始用量，用于事后与账单核对，不在业务侧预估计费金额。
 
-#### P2-3 超时阈值取值与「超时」口径统一
-- **设计目的**：既避免异常长任务空耗沙箱，又不误杀正常的长耗时分析。
-- **为何待确认**：已明确**等待 Agent 事件不设总超时、SSE 靠断点续传**；但 3.1.1「合理超时阈值」、5.1「超出运行阈值中断任务」措辞含糊，开发可能误加任务级总超时；取数分页的单次 HTTP 超时值也缺数据支撑。
-- **需确认的因素**：
-  1. leyosys 接口 P95/P99 响应时间 → 单次分页 HTTP 超时取值；
-  2. 分页页数/数据量上限（与 ≤10MB、超限提示联动）；
-  3. 是否保留任务级软超时（只告警/可中断，而非连接层硬超时），并据此统一 3.1.1、5.1 文字。
+#### P2-3 超时阈值与口径统一（已确认）
+- **一期结论**：一期不调用 leyosys 取数、不涉及分页与单次分页 HTTP 超时；Agent 仅生成查询条件。
+- **事件等待**：等待 Agent 事件不设置任务级总硬超时；SSE 依赖断点续传，连接层只处理网络超时与重连。
+- **软超时**：可保留“运行时长告警 + 用户可中断”的软超时能力，但不自动终止正常长任务。
 
 ### P3：二期 POC（不挡一期）
 1. 会话共享目录的挂载形态，以及接近 10MB 单文件的读写实测（3.1.3）；
@@ -80,16 +69,16 @@
 
 ## 一、项目概述
 ### 1.1 背景与目标
-基于火山引擎 Managed Agents 构建商品异常分析智能 Agent，复用已开发完成的 leyosys 沙箱自定义取数能力，结合可动态调整的业务分析规则，自动完成多维度商品异常诊断，输出结构化处理决策建议与分析报告，支撑业务人员高效定位问题、制定处置策略。
+基于火山引擎 Managed Agents 构建商品异常分析智能 Agent。一期先落地自然语言到结构化查询条件的生成能力，帮助业务人员准确表达取数与分析意图；二期再接入 leyosys 取数、规则执行与异常诊断能力。
 
 核心建设目标：
-1.  复用 leyosys 自定义 Skill，按用户维度鉴权调用业务接口，实现多源数据自动拉取与整合（鉴权、接口选择均在 Skill 内闭环）——**一期**
-2.  取数结果分层交付：对话呈现 + 结构化结果文件，文件留存 30 天——**一期**；异常诊断、规则匹配与业务分析规则热更新（规则调整无需重建沙箱、无需中断会话）——**二期**
-3.  支撑约 1000 名内部业务用户稳定使用，单次单用户原始数据量≤10MB
+1.  一期实现自然语言指令理解、参数澄清与结构化查询条件生成，不直接调用业务取数接口
+2.  一期支持同会话任务互斥、临时独立会话并行、事件流转发与审计入库
+3.  二期复用 leyosys 自定义 Skill 拉取数据，并建设异常诊断、规则匹配与规则热更新能力；单次单用户原始数据量≤10MB 作为二期约束
 
 ### 1.2 建设范围
-- ✅ 一期（本版落地）：Agent 编排设计、**leyosys 取数 Skill 集成（鉴权、接口选择、取数均已在 Skill 内实现）**、取数结果对话/文件交付、会话管理、每用户独立 Memory Store 设计、创建会话时直接注入用户凭据环境变量、文件归档存储、SSE 事件对接、成本与运维设计。**一期不含分析/规则引擎 Skill**
-- ⏭️ 二期（进阶）：**分析（规则执行引擎）Skill 与规则配置源热更新**（多 Skill 大数据按 3.1.3 会话共享目录模式接入）
+- ✅ 一期（本版落地）：Agent 编排设计、结构化查询条件生成、会话管理、每用户独立 Memory Store 设计、创建会话时直接注入用户凭据环境变量、Redis 同会话互斥、临时独立会话、SSE 事件对接、审计直接入库。**一期不调用 leyosys 取数 Skill，不做文件交付与 TOS 归档**
+- ⏭️ 二期（进阶）：leyosys 真实取数 Skill、分析（规则执行引擎）Skill 与规则配置源热更新（多 Skill 大数据按 3.1.3 会话共享目录模式接入）
 - ❌ 不包含：leyosys 业务系统开发、业务规则逻辑本身的研发、前端页面开发、业务侧后端服务
 
 ### 1.3 用户与使用模式
@@ -97,38 +86,38 @@
 - 触发方式：用户主动发送分析指令触发任务
 - 交互形态：单轮完整分析 + 多轮追问细化（如调整维度、重算、补充说明）
 - 鉴权粒度：leyosys 业务接口为**用户级独立鉴权**，每个用户凭据隔离；通过创建会话时注入环境变量承载用户 token
-- 数据规模：单次单用户分析原始数据量≤10MB，沙箱内内存处理，不落地持久化
+- 数据规模：一期不拉取原始业务数据；二期接入取数后，单次单用户原始数据量≤10MB，沙箱内内存处理
 
 ### 1.4 核心交付产物
-1.  **一期**：取数结果对话呈现（数据摘要/明细）+ 结构化结果文件（Excel 等），私有 TOS 归档，留存 30 天，可历史追溯
-2.  **二期**：对话式文字分析结论（异常类型、原因判断、处理建议、依据说明）与结构化分析报告文件（Markdown / Excel）
+1.  **一期**：结构化查询条件（商品范围、时间、维度、过滤、排序等）与生成说明，通过对话交付
+2.  **二期**：真实取数结果、对话式异常诊断结论（异常类型、原因判断、处理建议、依据说明）与结构化分析报告文件（Markdown / Excel）
 
 ### 1.5 平台环境与版本说明
 1. 本方案按**平台无关核心 + 平台适配器**组织：对外接口、表结构、防腐层、规范事件与火山/百炼/腾讯三家无关；火山方舟 Managed Agents 为首个实现，通过 `AgentPlatform` 适配器接入。
-2. 平台兼容范围：火山方舟（含 ArkClaw 企业版）、阿里百炼 Managed Agents、腾讯云 ADP；本方案一期只落地火山，百炼/腾讯保留映射占位与 POC 待验项。
-3. 本方案默认按最低兼容路径设计，确保快速上线；ArkClaw 企业版环境下可额外启用原生规则文件、企业级资源管控等增强能力，作为可选优化项。
+2. 平台兼容范围：火山方舟、阿里百炼 Managed Agents、腾讯云 ADP；本方案一期只落地火山，百炼/腾讯保留映射占位与 POC 待验项。
+3. 本方案默认按最低兼容路径设计，确保快速上线；计费按 Managed Agents 后付费账单口径管理。
 ---
 
 ## 二、整体架构与核心链路
 ### 2.1 总体架构分层
 | 层级 | 说明 | 本方案范围 |
 |---|---|---|
-| 用户交互层 | 前端对话入口、文件下载与历史查询 | 不涉及 |
+| 用户交互层 | 前端对话入口、任务状态与历史查询 | 不涉及 |
 | 接入转发层 | Java 自研后端 + `AgentPlatform` 防腐层，负责用户鉴权、对外业务接口、事件透传、资源管理 | 仅涉及 MA 对接相关逻辑 |
 | **MA 平台层（核心）** | 托管 Agent 平台（火山为首个实现，预留百炼/腾讯 ADP） | ✅ 本方案全覆盖 |
 | 业务依赖层 | leyosys 业务系统接口、业务规则配置源 | 不涉及，仅定义对接契约 |
 
 MA 平台层内部拆解：
-- **Agent 调度层**：大模型推理、指令解析、多 Skill 编排调度、结果整合
-- **Skill 执行层**：leyosys 取数 Skill、规则执行引擎 Skill、内置文件生成能力
-- **基础资源层**：沙箱运行环境、平台记忆/知识（火山 Memory Store 等，按平台能力映射）、产物归档存储（火山私有 TOS 等）
+- **Agent 调度层**：一期大模型推理、指令解析与查询条件生成；二期多 Skill 编排调度与结果整合
+- **Skill 执行层**：二期 leyosys 取数 Skill、规则执行引擎 Skill、内置文件生成能力；一期不调用
+- **基础资源层**：沙箱运行环境、平台记忆/知识（火山 Memory Store 等，按平台能力映射）；产物归档存储为二期预留
 
 **架构总览（组件与数据流视图）：**
 
 ```mermaid
 flowchart TB
     subgraph L1["用户交互层（本方案不涉及）"]
-        FE["前端对话入口<br/>文件下载 / 历史查询"]
+        FE["前端对话入口<br/>任务状态 / 历史查询"]
     end
 
     subgraph L2["接入转发层（仅涉及 MA 对接逻辑）"]
@@ -137,18 +126,18 @@ flowchart TB
 
     subgraph L3["MA 平台层（火山 Managed Agents，核心）"]
         subgraph L3A["Agent 调度层"]
-            LLM["大模型<br/>指令解析 · Skill 编排 · 结果整合"]
+            LLM["大模型<br/>一期：查询条件生成<br/>二期：Skill 编排 · 结果整合"]
         end
         subgraph SBX["沙箱运行环境"]
             subgraph L3B["Skill 执行层"]
-                S1["leyosys 取数 Skill（一期）"]
+                S1["leyosys 取数 Skill（二期）"]
                 S2["规则执行引擎 Skill（二期）"]
                 FGEN["内置文件生成能力"]
             end
         end
         subgraph L3C["基础资源层（随会话挂载）"]
             MS[("Memory Store<br/>每用户一库<br/>偏好 + 权限标识")]
-            TOS[("私有 TOS 归档<br/>30 天留存")]
+            TOS[("产物归档存储<br/>二期预留")]
         end
     end
 
@@ -162,15 +151,14 @@ flowchart TB
     FE <-->|"SSE / HTTP"| JAVA
     JAVA -->|"创建会话 / 发送事件<br/>SSE 事件流"| LLM
     JAVA -->|"读写用户偏好与权限"| MS
-    JAVA -->|"资源绑定 / 会话<br/>审计 / 文件索引"| DB
-    JAVA -->|"文件下载链接"| TOS
-    LLM -->|"编排调用"| S1
-    LLM -->|"二期：data_path 入参"| S2
-    LLM -->|"生成结果文件"| FGEN
+    JAVA -->|"资源绑定 / 会话<br/>审计 / 事件流水"| DB
+    LLM -.->|"二期：编排调用"| S1
+    LLM -.->|"二期：data_path 入参"| S2
+    LLM -.->|"二期：生成结果文件"| FGEN
 
     S1 -->|"HTTP 取数<br/>（会话环境变量凭据）"| LEY
     S2 -->|"拉取最新规则"| RULE
-    FGEN -->|"写 /mnt/session/outputs"| TOS
+    FGEN -.->|"二期：写 /mnt/session/outputs"| TOS
 
     S1 -.->|"二期：会话共享目录<br/>写文件 + 返回路径"| S2
 ```
@@ -178,23 +166,21 @@ flowchart TB
 ### 2.2 核心 Skill 分工与职责边界
 | Skill 名称 | 形态 | 职责 | 输入 | 输出 |
 |---|---|---|---|---|
-| leyosys 取数 Skill | 沙箱内自定义 Skill（已开发完成，**一期**） | Skill 内部完成鉴权与接口选择，拉取商品数据并按用户隔离 | Agent 提取的业务查询参数（商品范围、时间维度等） | 一期：结构化结果回传 Agent + 结果文件导出；二期对接分析 Skill 时：大结果写会话共享目录、返回路径（见 3.1.3）。单用户单次≤10MB |
+| leyosys 取数 Skill | 沙箱内自定义 Skill（已开发完成，**二期/预留**） | Skill 内部完成鉴权与接口选择，拉取商品数据并按用户隔离 | Agent 提取的业务查询参数（商品范围、时间维度等） | 真实取数结果；二期对接分析 Skill 时：大结果写会话共享目录、返回路径（见 3.1.3）。单用户单次≤10MB |
 | 规则执行引擎 Skill（分析 Skill） | 沙箱内自定义 Skill（**二期**，一期不建设） | 加载最新业务规则，执行规则匹配、异常分级、根因诊断 | **入参为取数 Skill 写入共享目录的文件路径**（显式 path 入参）+ 动态规则数据 | 异常诊断结论、根因判断、决策建议、依据明细 |
-| Agent 主模型 | 平台内置大模型 | 指令理解、参数提取、Skill 调度、结果整合、多轮对话；多 Skill 时传递共享目录路径 | 用户自然语言指令 | 最终文字回复、文件生成指令 |
+| Agent 主模型 | 平台内置大模型 | **一期**：指令理解与结构化查询条件生成，不调用取数 Skill、不生成文件；**二期**：Skill 调度、结果整合、多轮对话，多 Skill 时传递共享目录路径 | 用户自然语言指令 | 一期：结构化查询条件与解释；二期：最终文字回复、文件生成指令 |
 
-> **Skill 形态说明**：leyosys 取数 Skill（一期）与规则执行引擎 Skill（二期）均按**沙箱内自定义 Skill**实现，Skill 在沙箱内直接发起 HTTP 请求（取数调 leyosys 接口、规则调业务侧规则接口），不采用 custom_tool 回调 Java 后端的链路。若后续改为回调 Java 后端执行，需切换为 `agent.custom_tool_use` + `requires_action` 事件流。
+> **Skill 形态说明**：leyosys 取数 Skill 与规则执行引擎 Skill 均为二期能力，按**沙箱内自定义 Skill**实现，Skill 在沙箱内直接发起 HTTP 请求（取数调 leyosys 接口、规则调业务侧规则接口），不采用 custom_tool 回调 Java 后端的链路。若后续改为回调 Java 后端执行，需切换为 `agent.custom_tool_use` + `requires_action` 事件流。
 
 ### 2.3 完整执行主流程
 1.  用户发送自然语言分析指令（指定商品范围、时间、异常类型等）
 2.  Java 后端校验用户身份，查询对应用户的会话与资源绑定关系
 3.  Agent 解析指令，提取结构化查询参数
-4.  **【一期】** 调度 leyosys 取数 Skill（Skill 内自行鉴权、选接口），使用当前用户独立凭据拉取对应维度的商品数据（≤10MB，内存处理；大结果导出文件）
-5.  **【二期，一期不执行】** 取数 Skill 将数据写入会话共享目录约定路径并返回路径（见 3.1.3）；Agent 把路径作为显式入参调度规则执行引擎 Skill，Skill 读文件、从业务侧规则配置源拉取全量最新规则（内存处理），执行异常诊断
-6.  Agent 整合结果生成自然语言文字回复：一期为取数结果说明，二期为诊断结论与建议
-7.  如需生成文件，调用文件生成能力输出结构化文件至私有 TOS 归档目录
-8.  Java 后端异步更新用户偏好至 Memory Store，并将结果文件写入 `agent_report_file` 表
-9.  所有中间事件与最终结果通过 SSE 事件流推送至前端
-10. 任务结束，会话进入 idle 状态，沙箱停止计费；原始数据随沙箱内存释放，不持久化留存（归档文件除外）
+4.  **【一期】** Agent 基于用户意图生成结构化查询条件（商品范围、时间、维度、排序、过滤条件等）与可解释说明，不调用 leyosys、不拉取商品明细、不生成文件
+5.  Java 后端将查询条件与任务事件通过 SSE 推送至前端，并逐事件写入 `agent_event_log`
+6.  **【二期，一期不执行】** 调度 leyosys 取数 Skill 拉取真实数据；取数 Skill 将数据写入会话共享目录约定路径并返回路径（见 3.1.3）；Agent 把路径作为显式入参调度规则执行引擎 Skill，Skill 读文件、从业务侧规则配置源拉取全量最新规则（内存处理），执行异常诊断
+7.  **【二期，一期不执行】** Agent 整合结果生成诊断结论、建议与必要的文件产物
+8.  任务结束，会话进入 idle 状态；一期无原始业务数据与文件残留
 
 ### 2.4 对外业务接口（平台无关，前端只认这一套）
 > 原则：对外接口不暴露任何平台概念（session_id、平台 event_type、stop_reason、vault、memory_store 等）。`conversation_id` / `task_id` 均为我方生成的 UUID；接入层负责把我方接口翻译到 `AgentPlatform` 的火山/百炼/腾讯实现。
@@ -205,8 +191,8 @@ flowchart TB
 | `POST /conversations/{conversation_id}/messages` | 发送用户消息，返回 `task_id`（本轮分析任务） |
 | `POST /conversations/{conversation_id}/interrupt` | 中断当前轮 |
 | `GET /conversations/{conversation_id}/tasks/{task_id}` | 查询本轮任务状态与用量 |
-| `GET /conversations/{conversation_id}/files` | 查询历史产物文件列表 |
-| `GET /files/{file_id}/download` | 下载产物文件 |
+| `GET /conversations/{conversation_id}/files` | 查询历史产物文件列表（**二期预留，一期不启用**） |
+| `GET /files/{file_id}/download` | 下载产物文件（**二期预留，一期不启用**） |
 | `SSE /conversations/{conversation_id}/events` | 推送**我方规范事件**（见 4.3） |
 
 对外 SSE 事件（我方规范事件，与平台无关）：`user_message` / `message` / `tool_call` / `tool_result` / `approval` / `turn_end` / `error`。
@@ -246,6 +232,7 @@ public interface AgentPlatform {
 
 ### 3.1 自定义 Skill 集成设计
 #### 3.1.1 leyosys 取数 Skill
+- **阶段定位**：**二期/预留能力**；一期不调用该 Skill，Agent 仅生成查询条件
 - **部署形态**：沙箱内本地运行的自定义 Skill，随沙箱启动加载
 - **鉴权方式**：通过创建会话时注入该用户的 leyosys 鉴权凭据（会话级环境变量），Skill 内直接读取环境变量调用业务接口。凭据仅在会话创建时注入、运行期不可变，凭据轮换时由后端重建会话加载新凭据
 - **数据处理策略**：
@@ -253,7 +240,7 @@ public interface AgentPlatform {
   - 不写入沙箱本地持久化文件，避免 IO 开销与数据残留
   - 任务结束后数据随上下文释放，沙箱销毁后完全清除，符合数据安全要求
 - **用户隔离**：不同用户会话注入各自的环境变量凭据，沙箱与会话完全隔离，无交叉访问风险
-- **超时配置**：配置合理超时阈值，避免长耗时接口占用沙箱时长
+- **超时配置**：二期接入真实取数时，基于 leyosys 接口 P95/P99 实测确定单次 HTTP 超时与分页上限；一期无取数与分页，不设置任务级总硬超时
 - **错误约定**：标准化错误码与错误信息，Agent 可根据错误类型给出对应话术
 
 #### 3.1.2 分析规则热更新设计（**二期，随分析 Skill 一起上线；一期不建设**）
@@ -271,7 +258,7 @@ public interface AgentPlatform {
 
 #### 3.1.3 Skill 间协作机制（一期单 Skill；多 Skill 大数据走会话共享目录）
 
-**一期**：只上线 leyosys 取数 Skill，无 Skill 间数据传递；Agent 提取参数 → 调取数 Skill → 结果对话交付/文件导出。
+**一期**：不调用自定义 Skill；Agent 提取意图并生成结构化查询条件，以对话内容交付。Skill 间数据传递、文件导出与大数据协作均为二期能力。
 
 > **二期接入分析 Skill 时的大数据传递机制（已确认）**：
 >
@@ -283,25 +270,26 @@ public interface AgentPlatform {
 >    3. Agent 取到该路径后，将其作为**显式入参**传给分析 Skill；**分析 Skill 必须定义路径入参（如 `data_path`）来接收并读文件**，不得自行扫目录或猜路径
 >    4. 分析 Skill 读文件后在其进程内完成诊断，只把结论返回给 Agent，数据不进模型上下文
 > 4. **安全**：路径由 Skill 生成、不由用户输入决定；分析 Skill 对入参路径做前缀校验（必须在共享目录约定前缀内），防路径穿越
-> 5. **生命周期**：共享目录文件随会话沙箱生命周期，**不作长期留存**；需 30 天留存的报告/结果另行导出至 TOS（见 3.5），二者职责分开
+> 5. **生命周期**：共享目录文件随会话沙箱生命周期，不作长期留存；二期若需要文件长期留存，再按 3.5 的触发条件重新评审对象存储方案
 > 6. **异常**：路径不存在、格式不符或越权 → 分析 Skill 返回标准化错误，由 Agent 重新调取数 Skill 或告知用户；分析 Skill 自身失败则终止诊断，取数文件保留
 >
 > 【一期不触发】上述机制随二期分析 Skill 验证落地，需 POC 确认会话共享目录的具体挂载形态与单文件大小上限（接近 10MB 的文件实测）。
 
 - 调度模式（二期）：取数 → 路径传递 → 分析，由 Agent 串行编排
 - 数据传递：**路径/摘要过模型，完整数据走共享目录文件，不过模型上下文**
-- 异常中断：取数失败不再调分析；分析失败则诊断终止，已取数据与归档文件保留
+- 异常中断：取数失败不再调分析；分析失败则诊断终止，已取数据保留在会话沙箱内，是否归档由二期文件能力决定
 
 ### 3.2 会话管理设计
 #### 3.2.1 会话复用策略
 - **策略**：**一人一会话（one user one session）**，1000 用户对应约 1000 个常驻 session
 - **理由**：
   1.  用户主动触发、多轮追问场景多，复用会话保留上下文，提升交互连贯性
-  2.  资源（Memory Store、私有 TOS、会话环境变量）一次挂载/注入，全程生效，避免重复创建开销
+  2.  资源（Memory Store、会话环境变量）一次挂载/注入，全程生效，避免重复创建开销；私有 TOS 仅二期文件能力启用后再挂载
   3.  沙箱 30 天无活跃自动回收，闲置用户不产生运行成本
   4.  规则热更新不依赖会话重建，会话长期在线不影响规则生效
 - **边界**：同一用户多次分析复用同一会话，不同用户会话完全隔离，数据不互通
-- **并发限制**：同一 Session 不支持并发发送两条消息（平台约束）。同一用户并发的分析请求需由后端排队或拒绝（返回"上一任务进行中"），避免第二个请求覆盖或报错；如需并行分析，需为该用户创建临时独立会话，代价是上下文不复用
+- **并发限制（已确认）**：同一 Session 不支持并发发送两条消息（平台约束）。后端基于 Redis 锁以 `conversation_id` 为粒度互斥；锁占用中直接拒绝新消息并返回“上一任务进行中”，不做排队。任务到达最终态后释放锁，异常场景依赖 TTL 兜底释放。
+- **临时会话（已确认）**：允许用户创建临时独立会话并行处理；临时会话 `is_default=0`，不继承默认会话上下文，仅复用用户级配置、凭据与权限。
 
 #### 3.2.2 交互模式
 - 支持单轮一次性完整分析
@@ -335,7 +323,7 @@ public interface AgentPlatform {
   - 全局规则不占 Memory Store 空间（由业务侧配置源承载）
 - **生命周期**：
   - 用户级数据：随用户账号生命周期，离职/失效用户同步清理
-  - 文件索引：已迁至 `agent_report_file` 表，与 TOS 归档文件生命周期同步（30 天），到期同步清理（见 3.7.6）
+  - 文件索引：一期不启用；二期若启用文件产物，由 `agent_report_file` 表承载并按届时确认的生命周期管理
   - 规则数据：生命周期由业务侧配置源管理（保留最近 3 版），与本库解耦
 
 ### 3.4 凭据管理设计（去 Vault，统一按会话环境变量注入 token）
@@ -359,25 +347,17 @@ public interface AgentPlatform {
 - `business_user_agent_binding`：`user_id ↔ platform ↔ 平台资源引用（platform_config）`
 - `business_agent_session`：`user_id ↔ platform ↔ platform_session_id`，默认会话以 `is_default=1` 标识
 
-### 3.5 文件30天归档存储设计
-#### 3.5.1 存储方案选型
-采用**私有火山 TOS 桶挂载**方案，替代默认公共 TOS，满足30天法定留存需求。
-- 挂载方式：创建会话时通过 `resources` 挂载归档专用 TOS 桶，映射到沙箱内指定目录
-- 写入方式：Skill 生成报告文件直接写入 TOS 挂载目录，自动持久化到对象存储
-- 优势：文件生命周期自主可控，不受平台 7 天自动删除限制；支持30天保留策略、访问权限管控
+### 3.5 文件归档存储设计（二期预留；一期不启用）
+#### 3.5.1 一期决策
+- **不直接取数、不生成结果文档**：Agent 仅生成结构化查询条件，查询条件随会话消息与事件流水保存，不生成 Excel/Markdown 文件。
+- **不挂载私有 TOS**：无文件产物时不存在 7 天平台存储或 30 天归档诉求。
+- **不建设归档/清理任务**：`agent_report_file` 相关接口与清理逻辑均不启用。
 
-> **是否必须挂私有 TOS（待确认，见「待确认项清单」P0-1）**：本方案的唯一刚性理由是「文件需留存 30 天、可历史下载」，而平台默认产物存储 7 天自动删除、沙箱文件随沙箱回收。30 天的原始依据是**分析报告法定留存**，但一期产物是**取数结果文件**而非分析报告。若合规确认取数文件不适用 30 天留存、业务也不要求长期回溯，则一期直接用平台默认文件链路（Skill 写 `/mnt/session/outputs`，`GET /files` 带 `purpose=agent` 获取，见 4.2，存储期 7 天），取消桶挂载、TOS 归档与清理任务，`agent_report_file` 仅登记平台 file_id；若仍需 30 天，则保留本方案，但需补验挂载 TOS 目录是否同样注册到 Files API（若否则 Java 后端直接列举桶对象获取 `oss_path`）。
-
-#### 3.5.2 目录与命名规范
-- 按用户分目录：`/archive/{user_id}/year/month/`
-- 文件命名：`{分析类型}_{商品范围}_{时间}_{任务ID}.xlsx/md`
-- 索引关联：文件生成后，将路径、大小、时间写入 `agent_report_file` 表，支持前端查询与下载
-
-#### 3.5.3 生命周期与成本
-- 存储单价：**0.0015 元/GB/小时**（约 1.08 元/GB/月）
-- 保留策略：报告文件自生成之日起**标准存储30天**，到期自动删除
-- 索引同步：文件到期删除时，同步更新 `agent_report_file.status=1`
-- 容量测算：单份报告约 200KB，1000 用户日均 1 份，30天留存总量约 6GB
+#### 3.5.2 二期触发条件
+仅当后续评审确认需要真实取数、分析报告或文件交付时，再确定：
+1. 文件是否属于法定留存范围及留存天数；
+2. 使用平台默认产物存储（`/mnt/session/outputs` + Files API）还是私有 TOS；
+3. 若使用私有 TOS，需验证挂载目录是否注册到 Files API，以及下载权限、生命周期与索引同步方案。
 
 ### 3.6 规则内聚与功能解耦设计
 #### 3.6.1 核心设计原则
@@ -400,8 +380,9 @@ public interface AgentPlatform {
 
 #### 3.6.3 功能解耦与工具拆分
 按单一职责原则拆分，功能边界清晰，独立迭代、可复用：
-- **leyosys 取数 Skill（一期）**：业务接口数据拉取，鉴权/接口选择在 Skill 内闭环，按用户隔离
-- **报告/结果文件生成（一期）**：结构化结果文件输出、格式转换
+- **查询条件生成（一期）**：由 Agent 主模型完成自然语言理解、参数澄清与结构化查询条件输出
+- **leyosys 取数 Skill（二期）**：业务接口数据拉取，鉴权/接口选择在 Skill 内闭环，按用户隔离
+- **报告/结果文件生成（二期）**：结构化结果文件输出、格式转换
 - **商品信息标准化工具（二期可拆）**：商品名称/别名转标准编码、属性映射与权限校验，基础能力复用
 - **分析引擎 Skill（二期）**：规则加载、异常诊断、决策生成，核心业务逻辑唯一承载点；经会话共享目录 `data_path` 入参接收取数结果（见 3.1.3）
 
@@ -414,8 +395,8 @@ public interface AgentPlatform {
 3. **后端事件流观测兜底**：SSE 层观测本轮工具调用事件（平台成对稳定下发，见 3.7.0）；若分析类请求至 idle 仍无工具调用记录，**不自动重发消息**（Java 后端不去重、不替用户重入，重复执行由 Agent 侧承担，见 5.2），仅记录异常并提示用户重试，避免重复取数、重复计费与重复产物。
 
 #### 3.6.5 分阶段落地
-1. **一期（快速上线）**：只建取数链路——leyosys 取数 Skill（已就绪）+ 结果对话/文件交付 + 会话/凭据/Memory Store/TOS 对接，最小开发量跑通全链路。
-2. **二期（分析能力）**：建设分析引擎 Skill 与规则配置源，按 3.1.3 会话共享目录模式接入取数结果；商品标准化等基础能力按需拆出。
+1. **一期（快速上线）**：只建查询条件生成链路——会话/凭据/Memory Store + Redis 互斥 + 事件/审计入库，最小开发量跑通全链路。
+2. **二期（取数与分析能力）**：接入 leyosys 取数 Skill，建设分析引擎 Skill 与规则配置源，按 3.1.3 会话共享目录模式传递取数结果；商品标准化等基础能力按需拆出。
 3. **三期（动态优化）**：高频规则抽离至 Memory Store 加密存储，支持热更新。
 
 ### 3.7 数据表结构设计（平台无关 · V1.6 修订）
@@ -433,9 +414,9 @@ public interface AgentPlatform {
 | platform_status / stop_reason | `session.status_*` 事件（idle / running / terminated + stop_reason） | ✅ 直接返回 | 4.2 已确认 |
 | config_snapshot | 我方配置 hash 为主 + 平台版本辅助 | ✅（火山 agent_version 已确认） | 会话创建时确定并落 `config_snapshot`；百炼/腾讯的版本字段待 POC 复核，兜底用我方自管 config 版本 |
 | tool_call_count | 事件流中的工具调用事件（`agent.tool_use` / `agent.mcp_tool_use` / `agent.custom_tool_use`） | ✅ 直接返回（已确认） | 平台**逐次、稳定、成对下发**，每次工具调用有明确事件与唯一 ID，不丢失、不合并；Java 后端按本轮事件对计数，只落本轮汇总数，不存工具明细 |
-| input_tokens / output_tokens / cache_read_tokens / cache_creation_tokens | 火山返回的 usage（事件/接口） | ✅ 直接返回 | 平台字段：`input_tokens`、`output_tokens`、`cache_read_input_tokens`、`cache_creation_input_tokens`；落库映射见 3.7.3。注意：usage 随一轮内的**每次模型请求**（`span.model_request_end`，一轮因工具往返可有 N 次）分别返回，**Java 后端需在本轮内累加后只落一行汇总值**；该事件携带的平台 request_id 为单次模型请求粒度，**不落库**，仅在需与火山账单逐笔核对时回查事件流 |
+| input_tokens / output_tokens / cache_read_tokens / cache_creation_tokens | `span.model_request_end.model_usage` | ✅ 直接返回（已核对官方文档） | 官方字段：`model_usage.input_tokens`、`model_usage.output_tokens`、`model_usage.cache_creation_input_tokens`、`model_usage.cache_read_input_tokens`，另有 `model_usage.speed`；落库映射见 3.7.3。usage 随一轮内每次模型请求分别返回，Java 后端从本轮 `user.message` 提交成功累加至非 `requires_action` 的 `session.status_idle`，最终只落一行汇总。官方事件示例未携带 `request_id`，对账以事件 `id` / `model_request_start_id` 关联 |
 | running_duration_ms | 后端观察 running → idle 自行计时 | ❌ 平台不直接给单次时长 | 由 started_at / ended_at 计算，可靠 |
-| cost | 后端按官方单价回算 | ❌ 平台不直接给单次费用 | 由 token / 时长 / 工具次数计算，不得采信模型返回值 |
+| cost | 后端按账单周期核对（可选） | ❌ 平台不直接给单次费用 | Managed Agents 为后付费，业务侧不预估单次费用；如需成本展示，只能基于账单分摊，不得采信模型返回值 |
 | model | 业务侧创建 Agent 时指定，或事件返回 | ✅ 业务侧已知 | 若会话可覆写模型，需记录覆写后的值 |
 | error_code / error_msg | `error` 事件（后端归一化） | ⚠️ 事件归一化 | 4.2 已注明 error 为归一化事件，非方舟原生事件名 |
 | object_path / 文件归属 | 火山 `GET /files?scope_id&purpose=agent`（已确认）；百炼 Files、腾讯按各自能力 | ✅ 火山直接返回 | 火山 Skill 写 `/mnt/session/outputs` 自动注册为 `purpose=agent`；产物发现统一由 `AgentPlatform.listArtifacts` 抽象，归档对象路径落 `object_path` |
@@ -505,7 +486,7 @@ public interface AgentPlatform {
 
 约束：`UNIQUE(task_id)`；`INDEX(user_id, started_at)`；`INDEX(platform, platform_session_id)`。Java 后端不做请求去重——用户每发送一条消息均由 Agent 完整执行并落一行记录，重复提交由 3.2.1 的同会话并发限制兜底。三平台统一用量模型：token 五列 + `running_duration_ms` + `tool_call_count` + `tool_fee`；平台计费差异（如百炼 MCP 费、腾讯 PU）进 `platform_usage`，`cost` 由后端按平台单价汇总回算。
 
-#### 3.7.4 agent_report_file（报告文件索引，30 天生命周期）
+#### 3.7.4 agent_report_file（报告文件索引；二期预留，一期不启用）
 | 字段 | 类型 | 说明 | 必填 |
 |---|---|---|---|
 | id | BIGINT | 自增主键 | 是 |
@@ -520,10 +501,10 @@ public interface AgentPlatform {
 | platform_config | JSON | 平台文件引用（火山 file_id / 百炼 file_id / 腾讯引用） | 否 |
 | file_size | INT | 文件字节数 | 否 |
 | status | TINYINT | 0 有效 / 1 已过期删除 | 是 |
-| expire_at | DATETIME(3) | 到期时间（30 天） | 是 |
+| expire_at | DATETIME(3) | 到期时间（二期启用文件能力时定义） | 是 |
 | created_at | DATETIME(3) | 创建时间 | 是 |
 
-约束：`UNIQUE(file_id)`；`INDEX(conversation_id, created_at)`；`INDEX(expire_at)`；`INDEX(call_log_id)`。该表作为文件索引真源，支持列表/分页/生命周期清理。文件登记经 `AgentPlatform.listArtifacts` 抽象：火山走 `GET /files?scope_id&purpose=agent`，百炼走 Files API，腾讯按其能力；归档统一到自有对象存储写 `object_path`，平台文件引用进 `platform_config`。
+约束：`UNIQUE(file_id)`；`INDEX(conversation_id, created_at)`；`INDEX(expire_at)`；`INDEX(call_log_id)`。一期不生成文件、不写入该表、不启用文件接口与生命周期任务；表结构保留供二期文件能力复用。二期若启用，文件登记经 `AgentPlatform.listArtifacts` 抽象：火山走 `GET /files?scope_id&purpose=agent`，百炼走 Files API，腾讯按其能力；归档统一到自有对象存储写 `object_path`，平台文件引用进 `platform_config`。
 
 #### 3.7.5 agent_event_log（会话事件流水，评估/审计用）
 > 用途：完整保存一轮会话的原始事件（用户消息、助手消息、工具调用与结果、状态变化），供事后评估、质量分析、复现与审计。与 `agent_call_log` 的差异：`agent_call_log` 是**按轮聚合**的统计行（成本/用量），本表是**按事件**的流水（保真时序）。
@@ -659,9 +640,9 @@ CREATE TABLE agent_event_log (
 
 #### 3.7.7 生命周期与清理
 - 会话：`business_agent_session.last_active_at` 超过阈值置 `biz_status=1` 或归档；配置升级置 `biz_status=2`（只读）而非删除，保留历史可查；用户离职同步清理。
-- 审计：`agent_call_log` 按月分区/归档，保留周期与财务对账要求一致（建议 ≥90 天，待确认）。
-- 事件流水：`agent_event_log` 仅用于评估/审计，保留窗口建议与评估需求一致（≥90 天，待确认）；因含原始事件 payload，需权限管控与脱敏。
-- 文件：定时任务按 `agent_report_file.expire_at` 清理对象存储并置 `status=1`，与 30 天生命周期一致。
+- 审计（已确认）：`agent_call_log` 永久保存，直接写入业务数据库，不做按月到期清理或外部归档删除。
+- 事件流水（已确认）：`agent_event_log` 永久保存，直接写入业务数据库；因含原始事件 payload，需权限管控与脱敏，可通过索引或只读副本优化查询。
+- 文件：一期不启用；二期如启用文件产物，再按届时确认的留存策略清理对象存储并同步 `agent_report_file.status`。
 ---
 
 ## 四、接口与事件规范
@@ -691,7 +672,7 @@ implementation "com.volcengine:ark-runtime:0.6.0"
 #### 4.0.3 接口方法映射（原 Node 手写 HTTP → Java SDK）
 | 能力 | 实际 SDK 方法（ArkService / ArkApi） | 说明 |
 |---|---|---|
-| 创建会话 | `createSession(CreateSessionRequest, headers)` → `Single<Session>` | `agent` 用 `AgentIdentifier`；`resources` 挂 Memory Store / 私有 TOS；**用户凭据注入在 `environment.config.env`**（`EnvironmentConfigOverride.env` 的 `Map<String,String>`），非顶层字段 |
+| 创建会话 | `createSession(CreateSessionRequest, headers)` → `Single<Session>` | `agent` 用 `AgentIdentifier`；一期 `resources` 仅挂 Memory Store，私有 TOS 二期按需挂载；**用户凭据注入在 `environment.config.env`**（`EnvironmentConfigOverride.env` 的 `Map<String,String>`），非顶层字段 |
 | 查询 / 更新 / 删除会话 | `getSession(id)` / `updateSession(id, UpdateSessionRequest)` / `deleteSession(id)` | **无 `terminateSession`**，归档/清理用 `deleteSession`（或按平台语义 `updateSession`） |
 | 发送用户事件（消息 / 中断 / 工具结果） | `sendSessionEvents(sessionId, SendSessionEventsRequest, headers)` → `Single<SendSessionEventsResponse>` | **无 `sendMessage`**；`SendSessionEventsRequest.events` 为 `List<ManagedAgentsEventParams>`，分别用 `ManagedAgentsUserMessageEventParams` / `ManagedAgentsUserInterruptEventParams` / `ManagedAgentsUserCustomToolResultEventParams` 提交 |
 | 订阅会话事件流（SSE） | `streamSessionEvents(sessionId, headers)` → `Call<ResponseBody>` | 返回原始响应体，需自行解析 SSE 帧 |
@@ -709,12 +690,13 @@ implementation "com.volcengine:ark-runtime:0.6.0"
 #### 4.0.4 SSE 事件监听
 SDK 提供 `streamSessionEvents(sessionId)` 返回 Retrofit `Call<ResponseBody>`，但**不负责解析 SSE 帧**；接入层基于 OkHttp（SDK 底层依赖）解析响应体中的 `text/event-stream`：
 - 端点由 SDK 封装（等价 `{baseUrl}/sessions/{sessionId}/events/stream`），Header `Authorization: Bearer {apiKey}`；
-- 监听并分发 `agent.message`、`agent.custom_tool_use`、`span.model_request_end`、`session.status_idle`、`error` 等事件（见 4.2）；
+- 监听并分发 `agent.message`、`span.model_request_end`、`session.status_running`、`session.status_idle`、`session.error`、二期回调链路的 `agent.custom_tool_use` 等事件（见 4.2）；
 - 断线重连用 SSE `id` / `Last-Event-ID` 续传；历史补偿用 `listSessionEvents`；事件去重由 `agent_event_log.event_id` 唯一约束兜底。
 
 #### 4.0.5 自定义工具两条路径
-1. **一期：沙箱内自定义 Skill**（leyosys 取数，已在 Skill 内闭环鉴权/取数）——不走 `SelfHostedClient`，后端仅经 `ArkService` 管理会话、`sendSessionEvents` 发消息、`streamSessionEvents` 监听事件；Skill 在沙箱内直连 leyosys。
-2. **二期/回调链路：自托管 Worker（`SelfHostedClient`）**——当工具需由业务后端执行（如分析 Skill 改为 custom_tool）时启用。其核心接口为 `pollWork` / `ackWork` / `heartbeatWork` / `stopWork`（领取与确认工单）、`sendEvent` / `openEventStream`（收发会话事件）、`Tool.execute(input, ToolContext)`（业务工具实现）；**回传结果走 `sendEvent` / `sendSessionEvents` 的 `user.custom_tool_result` 事件，无 `postCustomToolResult` 方法**。
+1. **一期：无自定义工具调用**——Agent 主模型仅生成结构化查询条件，后端经 `ArkService` 管理会话、`sendSessionEvents` 发消息、`streamSessionEvents` 监听事件。
+2. **二期：沙箱内自定义 Skill**（leyosys 取数，已在 Skill 内闭环鉴权/取数）——不走 `SelfHostedClient`，Skill 在沙箱内直连 leyosys。
+3. **二期/回调链路：自托管 Worker（`SelfHostedClient`）**——当工具需由业务后端执行（如分析 Skill 改为 custom_tool）时启用。其核心接口为 `pollWork` / `ackWork` / `heartbeatWork` / `stopWork`（领取与确认工单）、`sendEvent` / `openEventStream`（收发会话事件）、`Tool.execute(input, ToolContext)`（业务工具实现）；**回传结果走 `sendEvent` / `sendSessionEvents` 的 `user.custom_tool_result` 事件，无 `postCustomToolResult` 方法**。
 
 #### 4.0.6 Token 用量累计
 - 一轮任务内每次模型请求由 `span.model_request_end` 事件返回 usage（input / output / cache_read / cache_creation）；
@@ -722,7 +704,7 @@ SDK 提供 `streamSessionEvents(sessionId)` 返回 Retrofit `Call<ResponseBody>`
 
 #### 4.0.7 关键模型字段（已反编译核实，编码时直接对应）
 - **凭据注入**：`CreateSessionRequest.environment`（`EnvironmentWithOverrides`）→ `.config`（`EnvironmentConfigOverride`）→ `.env(Map<String,String>)`，对应一期「会话环境变量注入用户凭据」；`EnvironmentConfigOverride` 另含 `packages` / `networking` / `setupScript` / `tos`。
-- **资源挂载**：`CreateSessionRequest.resources` 为 `List<SessionResource>`；`SessionResource` 支持 `type`（file / memory_store / tos 等）、`memoryStoreId`、`fileId`、`access`（只读/读写）、`mountPath`、`tosBucket` / `tosKey` / `tosRegion`。据此：Memory Store 用 `type=memory_store + memoryStoreId + access=read_only`；私有 TOS 用 `type=tos + tosBucket/tosKey/tosRegion`。
+- **资源挂载**：`CreateSessionRequest.resources` 为 `List<SessionResource>`；`SessionResource` 支持 `type`（file / memory_store / tos 等）、`memoryStoreId`、`fileId`、`access`（只读/读写）、`mountPath`、`tosBucket` / `tosKey` / `tosRegion`。据此：一期 Memory Store 用 `type=memory_store + memoryStoreId + access=read_only`；私有 TOS 仅二期文件能力启用后再挂载。
 - **会话事件提交**：`SendSessionEventsRequest.events` 为事件参数列表，一期实际用到 `ManagedAgentsUserMessageEventParams`（发用户消息）、`ManagedAgentsUserInterruptEventParams`（中断）；二期 custom tool 回传用 `ManagedAgentsUserCustomToolResultEventParams`。
 - **事件流解析**：`streamSessionEvents` 返回原始 `ResponseBody`，事件对象含 `ManagedAgentsStartEvent` / `ManagedAgentsDeltaEvent` / `ManagedAgentsSessionEvent` 等，接入层按事件 `type` 分发（具体事件枚举以 SDK 当前版本为准，仍需与 4.2 的实测事件名对齐）。
 
@@ -730,10 +712,10 @@ SDK 提供 `streamSessionEvents(sessionId)` 返回 Retrofit `Call<ResponseBody>`
 | 类别 | 接口 | 用途 |
 |---|---|---|
 | 资源管理 | 创建 Memory Store、写入/删除记忆条目 | 用户配置、权限标识管理（每用户一库） |
-| 会话管理 | 创建 Session | 挂载用户 Memory Store、私有 TOS，注入用户凭据环境变量 |
+| 会话管理 | 创建 Session | 挂载用户 Memory Store，注入用户凭据环境变量；一期不挂载私有 TOS |
 | 会话管理 | 发送用户事件 | 提交分析指令、中断任务 |
-| 事件流 | SSE Stream 接口 | 监听消息、Skill 调用、状态、文件等事件 |
-| 文件管理 | 获取文件下载链接 | 归档报告文件分发 |
+| 事件流 | SSE Stream 接口 | 监听消息、模型用量、状态与二期 Skill 调用等事件 |
+| 文件管理 | 获取文件下载链接 | 二期文件能力预留，一期不启用 |
 
 
 ### 4.2 SSE 核心事件类型与处理逻辑
@@ -742,11 +724,14 @@ SDK 提供 `streamSessionEvents(sessionId)` 返回 Retrofit `Call<ResponseBody>`
 | 事件类型 | 触发时机 | 处理逻辑 |
 |---|---|---|
 | `agent.message` | Agent 生成文字回复 | 增量推送至前端 |
+| `span.model_request_end` | 单次模型请求结束 | 解析 `model_usage` 四类 token 与 `speed`，按本轮边界累加至 `agent_call_log`；以事件 `id` / `model_request_start_id` 保留审计关联 |
+| `session.status_running` | Session 开始或恢复执行 | 更新任务运行状态，开始/继续运行时长观察 |
 | `session.status_idle`（`requires_action`） | 等待 custom tool 回传结果 | **不算本轮结束**，回传 `user.custom_tool_result` 后继续；一期沙箱 Skill 场景一般不触发 |
 | `session.status_idle`（真正空闲） | 本轮分析任务结束 | 标记任务完成、停止计时、异步更新索引 |
 | `agent.custom_tool_use` | custom tool 开始执行（二期/回调链路） | 记录日志、前端展示执行状态 |
+| `session.error` | 平台返回不可恢复错误 | 记录原始错误并归一化为我方 `error` 事件，标记任务失败 |
 
-> 说明：① 事件类型以官方「会话事件类型」文档为准，custom tool 事件带 `agent.` 前缀；② 方舟原生事件中未见 `file` 事件，产物文件在 `session.status_idle` 后通过 Files API 轮询获取：Skill 写入沙箱 `/mnt/session/outputs` 目录的文件会**自动注册到 Files API，用途标记为 `purpose=agent`**；`GET /files` 默认按 `purpose=user_data` 过滤（只返回用户上传文件），**必须显式带 `scope_id={session_id}&purpose=agent`**，否则返回空列表会误判为无产物；取到文件后更新索引并向前端提供下载链接；③ 后端向前端透出的 `error` 为归一化错误事件，非方舟原生事件名。
+> 说明：① 事件类型以官方「Session 事件流」与「流式获取会话事件」文档为准，事件名遵循 `{domain}.{action}`；② Custom Tool 事件为 `agent.custom_tool_use`，`requires_action` 期间需按 `custom_tool_use_id` 回传 `user.custom_tool_result`，多个阻塞事件建议放入同一 `events` 数组；③ 一期无文件产物，不调用 Files API 轮询；二期若启用文件交付，产物文件在 `session.status_idle` 后通过 Files API 获取：Skill 写入沙箱 `/mnt/session/outputs` 目录的文件会自动注册为 `purpose=agent`，必须显式带 `scope_id={session_id}&purpose=agent`；④ 后端向前端透出的 `error` 为归一化事件，火山原生错误事件为 `session.error`。
 
 ### 4.3 我方规范事件与三平台映射（平台无关）
 | 我方规范事件 | 火山方舟 | 阿里百炼 | 腾讯 ADP（HTTP SSE） |
@@ -757,7 +742,7 @@ SDK 提供 `streamSessionEvents(sessionId)` 返回 Retrofit `Call<ResponseBody>`
 | `tool_result` | `agent.tool_result` / `user.custom_tool_result` | `tool_call_output` / `mcp_call_output` | tool_call 消息 Status=success/failed，输出在 Contents |
 | `approval` | `session.status_idle`(requires_action) | `tool_approval_request` / `tool_approval_response` | `message.added`(Type=questionnaire)，作答走新请求 |
 | `turn_end` | `session.status_idle`(非 requires_action) | `session_status`(null/end_turn/retries_exhausted) | `response.completed` / `done` |
-| `error` | `error`（归一化） | `error` | `error` |
+| `error` | `session.error`（归一化） | `error` | `error` |
 
 > 注意：approval 的裁决回传方式三平台不同（火山同会话续跑、百炼 `tool_approval_response`、腾讯新请求），防腐层需抽象「交互型事件 + 续跑/裁决」，不能只做字段名映射。
 
@@ -767,18 +752,18 @@ SDK 提供 `streamSessionEvents(sessionId)` 返回 Retrofit `Call<ResponseBody>`
 ### 5.1 核心异常场景与处理
 | 异常场景 | 触发原因 | 处理策略 |
 |---|---|---|
-| 取数 Skill 鉴权失败 | 用户凭据过期、权限变更 | 返回鉴权失败提示，引导重新认证；触发会话重建加载新凭据 |
-| 取数 Skill 执行失败 | 接口超时、参数错误、数据为空 | 返回明确错误话术，提示用户检查查询条件；数据为空时给出空值说明 |
-| 规则加载失败 | 业务侧规则接口不可用、版本不兼容 | 按重试策略重试；仍失败则返回明确错误提示，引导稍后重试，避免用错误规则产出结论 |
-| 数据量超限 | 单次分析数据超过10MB阈值 | 提示用户缩小查询范围，分批分析；避免沙箱内存溢出 |
-| 沙箱执行超时 | 分析任务耗时过长，超出运行阈值 | 中断任务，返回已完成部分结论，支持用户重新发起 |
+| 同会话并发冲突 | Redis 锁显示上一任务未结束 | 直接拒绝新消息，返回“上一任务进行中”；如需并行，引导创建临时独立会话 |
+| 查询条件生成失败 | 用户意图不完整、缺少必要参数、模型输出不符合 Schema | 返回澄清问题或参数缺失提示，不生成部分条件 |
+| 模型调用失败 | 限流、服务异常 | 重试 1 次；仍失败则返回友好提示，记录告警 |
 | SSE 连接断开 | 网络波动、代理超时 | 自动重连 + `Last-Event-ID` 断点续传，不丢失事件，用户无感知 |
-| 模型调用失败 | 限流、服务异常 | 重试 1 次，仍失败则返回友好提示，记录告警 |
-| 文件归档失败 | TOS 写入异常、权限不足 | 先写入沙箱本地临时目录，后台重试归档；同步记录告警 |
+| 运行时长偏长 | 任务运行超过软阈值 | 仅告警并保留用户中断入口，不自动终止任务 |
+| 二期：取数 Skill 鉴权失败 | 用户凭据过期、权限变更 | 返回鉴权失败提示，引导重新认证；触发会话重建加载新凭据 |
+| 二期：取数 Skill 执行失败 | 接口超时、参数错误、数据为空 | 返回明确错误话术，提示用户检查查询条件；数据为空时给出空值说明 |
+| 二期：数据量超限 | 单次取数超过10MB阈值 | 提示用户缩小查询范围，分批分析；避免沙箱内存溢出 |
 
 ### 5.2 重试与重复提交
-- **重试策略**：取数接口指数退避重试 3 次；规则加载重试 2 次；模型调用失败重试 1 次
-- **重复提交**：Java 后端不做请求去重，用户每发送一条消息都由 Agent 完整执行；`agent_call_log` 以自增 `id` 按轮记账，不设业务幂等键。同会话并发由 3.2.1 限制（排队或拒绝），避免平台侧并发报错；SSE 断连重连只续传事件，不产生新任务行
+- **重试策略**：模型调用失败重试 1 次；二期真实取数接口再基于 P95/P99 实测确定指数退避次数与单次 HTTP 超时
+- **重复提交**：Java 后端不做请求级幂等去重，用户每发送一条消息都由 Agent 完整执行；`agent_call_log` 以自增 `id` 按轮记账。同一会话并发由 Redis 锁直接拒绝，避免平台侧并发报错；SSE 断连重连只续传事件，不产生新任务行
 - **断点续传**：SSE 事件流支持 `Last-Event-ID`，断连重连后从断点继续，不重复推送
 
 ---
@@ -791,59 +776,36 @@ SDK 提供 `streamSessionEvents(sessionId)` 返回 Retrofit `Call<ResponseBody>`
 - 最小权限原则：仅注入业务接口调用所必需的凭据
 
 ### 6.2 数据安全
-- 业务原始数据仅在沙箱内存中处理，不持久化到本地存储，任务结束即释放
-- Memory Store 仅存用户配置与权限标识，不存储原始业务明细数据与规则数据；文件索引由 `agent_report_file` 表承载
-- 私有 TOS 归档文件支持服务端加密，访问权限受控，30天自动清理
+- 一期不调用业务取数接口，不产生原始商品明细数据；用户指令、生成条件与事件流水按审计要求直接入库
+- Memory Store 仅存用户配置与权限标识，不存储原始业务明细数据与规则数据
+- 一期不挂载私有 TOS、不生成文件；二期若启用文件能力，再补充对象存储加密、访问权限与生命周期策略
 - 不同用户会话、沙箱、资源完全隔离，数据不互通
 
 ### 6.3 审计追溯
-- 所有 Skill 调用、文件生成、任务执行均有完整会话事件日志
+- 所有任务执行均有完整会话事件日志；二期 Skill 调用与文件生成同样逐事件落库
 - 支持按 `session_id`、`user_id` 追溯完整执行链路与操作记录
 - 规则更新、凭据更新均留存操作日志，可审计
 
 ---
 
 ## 七、成本与资源治理
-### 7.1 1000 人规模月度成本估算（参考）
-| 计费项 | 测算假设 | 月度预估 |
-|---|---|---|
-| Agent 沙箱运行时 | 人均每日 2 次分析，单次平均 5 分钟 running | 约 2500 元 |
-| 模型推理 Token | 单次分析合计 10k token，使用 doubao-seed-2.1-turbo | 约 360 元 |
-| 工具调用 | 自定义 Skill 无平台调用费 | 0 元 |
-| Memory Store（每用户单库） | 公测阶段免费 | 0 元 |
-| 私有 TOS 归档存储 | 30天留存总量约 6GB，1.08 元/GB/月 | 约 7 元 |
-| **总计** | - | **约 2870 元/月** |
+### 7.1 计费模式（已确认）
+- Managed Agents 采用**后付费**模式，费用以火山账单为准，本方案不做月度预估计费表，不引入 ArkClaw 预付费席位测算。
+- `agent_call_log` 记录 `input_tokens`、`output_tokens`、`cache_read_input_tokens`、`cache_creation_input_tokens`、`running_duration_ms` 与 `platform_usage`，用于账单核对与异常用量分析。
+- 不在任务实时链路中计算费用，避免因单价、缓存折扣或账单口径变化导致业务侧成本数据失真。
 
-> 说明：沙箱费用按 0.5 元/小时 × 1000 人 × 2 次/日 × 5 分钟 ≈ 83 元/日 × 30 ≈ 2500 元/月；模型费用按 1000 人 × 2 次/日 × 30 日 × 10k token，单价以官方模型定价为准。以上为粗略估算，实际随使用频率、单次时长、模型选型、归档量波动。
 
-### 7.2 ArkClaw 企业版（包年包月预付费）
-按「席位」预付费计费，费用包含对应规格的 CPU、内存、持久存储、网盘等计算与网络资源，适合规模化生产使用。
-**平台托管模式本身不额外收取服务费**，属于企业版标准账号管理方式之一。
 
-#### 单席位月费基准（仅 ArkClaw 实例本身）
-| 规格 | 单席位月费 | 核心配置 | 适用场景 |
-|---|---|---|---|
-| 轻量版 Starter | 210 元/月 | 2核 / 4GiB 内存 / 60GiB 存储 / 10GB 网盘 | 入门体验、轻量任务 |
-| 标准版 Standard | 430 元/月 | 4核 / 8GiB 内存 / 80GiB 存储 / 20GB 网盘 | 日常生产、中等复杂度工作流 |
-| 高级版 Premium | 860 元/月 | 8核 / 16GiB 内存 / 160GiB 存储 / 40GB 网盘 | 复杂任务、多工具并行 |
-| 旗舰版 Ultimate | 1720 元/月 | 16核 / 32GiB 内存 / 160GiB 存储 / 80GB 网盘 | 大型项目、高负载全链路编排 |
+### 7.2 成本优化策略
+1. **模型分层**：简单查询条件生成用轻量模型，复杂多轮澄清再用更强模型
+2. **闲置回收**：依赖平台 30 天不活跃沙箱自动回收机制，降低无效运行时长
+3. **任务优化**：一期仅生成查询条件，不拉取明细，天然降低模型 token 与沙箱运行时长
+4. **账单核对**：按月导出火山账单，与 `agent_call_log` 聚合指标比对，发现异常用量
 
-#### 关键计费规则
-1. **购买门槛**：企业版单次购买席位数量不少于 5 个，不足 5 个无法下单；总费用 = 单席位单价 × 席位数量。
-2. **模型费用单独计费**：席位费仅包含实例运行资源，Agent Plan Team（大模型调用额度）需搭配购买，不包含在基础席位费中。
-3. **购买时长**：支持 1 个月、6 个月、1 年，包年可享折扣，具体以购买页为准。
-
-### 7.3 成本优化策略
-1.  **模型分层**：简单查询用 lite，常规分析用 turbo，复杂深度分析用 pro
-2.  **闲置回收**：依赖平台 30 天不活跃沙箱自动回收机制，降低无效运行时长
-3.  **任务优化**：减少 Skill 执行空转时间，数据预处理与规则计算尽量收敛在 Skill 内
-4.  **规则加载优化**：规则接口侧配置缓存/压缩，减少每次执行重复拉取的开销；一期先保持实时拉取以保证热更新即时性
-5.  **存储精简**：报告文件控制大小，30天自动清理，避免无效存储堆积
-
-### 7.4 资源生命周期管理
-- **用户维度**：用户离职/失效时，同步清理对应 Memory Store、历史会话
+### 7.3 资源生命周期管理
+- **用户维度**：用户离职/失效时，停用平台资源并保留审计数据；如需清理 Memory Store 与历史会话，须先完成合规审批
 - **会话维度**：长期闲置会话保留 session 对象，沙箱自动回收，不产生费用
-- **文件维度**：私有 TOS 配置30天生命周期，到期自动删除，同步清理索引
+- **文件维度**：一期无文件产物；二期启用后再定义生命周期
 - **规则维度**：业务侧配置源保留最近 3 版规则，历史版本定期清理
 
 ---
@@ -851,27 +813,27 @@ SDK 提供 `streamSessionEvents(sessionId)` 返回 Retrofit `Call<ResponseBody>`
 ## 八、运维与可观测性
 ### 8.1 日志体系
 - 会话事件日志：平台原生完整事件流，用于全链路排查
-- Skill 执行日志：沙箱内标准输出，用于定位 Skill 报错
-- 接入层日志：Java 后端请求、SSE 连接、重连、错误、规则加载日志
+- Skill 执行日志：二期启用 Skill 后，通过沙箱内标准输出定位报错
+- 接入层日志：Java 后端请求、SSE 连接、重连、错误、并发锁与事件解析日志
 
 ### 8.2 核心监控指标
 - 业务指标：在线会话数、日任务量、任务成功率、平均响应时长
-- 资源指标：沙箱运行时长、Token 消耗量、文件生成量、TOS 存储用量
-- 异常指标：错误率、SSE 重连次数、Skill 失败率、鉴权失败率
-- 规则指标：规则更新频率、加载成功率、版本分布
+- 资源指标：沙箱运行时长、Token 消耗量、缓存命中量；二期增加文件生成量与对象存储用量
+- 异常指标：错误率、SSE 重连次数、并发拒绝率、鉴权失败率；二期增加 Skill 失败率
+- 规则指标：二期启用规则配置源后监控更新频率、加载成功率、版本分布
 
 ### 8.3 排障路径
 1.  按 `session_id` 拉取完整会话事件流，定位失败节点
-2.  查看对应 Skill 执行日志，定位代码/参数/接口问题
-3.  核对 Memory Store、TOS 资源挂载与权限配置，以及会话环境变量注入
+2.  核对 Memory Store 资源挂载与权限配置，以及会话环境变量注入
+3.  二期启用 Skill 后，查看对应 Skill 执行日志，定位代码/参数/接口问题
 4.  核查模型调用与限流情况
 5.  规则异常时核对业务侧规则配置源的版本与内容
 
 ---
 
 ## 九、方案落地实施建议
-1.  **一期优先落地核心链路**：用户会话管理 + 每用户 Memory Store + 会话环境变量凭据 + leyosys 取数 Skill（已开发完成，直接接入）+ 取数结果对话/文件交付与 TOS 归档，验证主流程通畅；**不含分析 Skill 与规则配置源**
-2.  **二期扩展能力**：分析引擎 Skill（会话共享目录 `data_path` 接入，见 3.1.3）+ 规则热更新（业务侧配置源实时拉取）、精细化权限、历史查询与归档管理
+1.  **一期优先落地核心链路**：用户会话管理 + 每用户 Memory Store + 会话环境变量凭据 + Agent 生成结构化查询条件 + Redis 同会话互斥 + 临时独立会话 + 事件/审计直接入库，验证主流程通畅；**不调用 leyosys 取数 Skill，不做文件交付与 TOS 归档**
+2.  **二期扩展能力**：leyosys 真实取数 Skill、分析引擎 Skill（会话共享目录 `data_path` 接入，见 3.1.3）+ 规则热更新（业务侧配置源实时拉取）、精细化权限、历史查询与归档管理
 3.  **灰度验证**：先小范围用户试点，验证性能、成本、稳定性后全量推广
 4.  **预案准备**：提前准备平台异常降级方案，核心业务场景配置备用调用路径
 
