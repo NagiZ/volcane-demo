@@ -8,4 +8,6 @@ export type NormalizedSseEvent =
       call_id: string;
       status: 'running' | 'done' | 'error';
       message?: string;
+      /** 方舟 agent.custom_tool_use.input */
+      input?: Record<string, unknown>;
     };

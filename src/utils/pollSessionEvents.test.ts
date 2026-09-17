@@ -412,7 +412,11 @@ describe('pollSessionEventsForAgentReply', () => {
 
   it('requires_action 触发回调且不提前结束，真正 idle 才收口', async () => {
     const pendingSeen: string[][] = [];
-    const tools: Array<{ status: string; call_id: string }> = [];
+    const tools: Array<{
+      status: string;
+      call_id: string;
+      input?: Record<string, unknown>;
+    }> = [];
     const deltas: string[] = [];
     const rounds: ArkSessionEvent[][] = [
       [
@@ -450,7 +454,12 @@ describe('pollSessionEventsForAgentReply', () => {
       pollIntervalMs: 1,
       timeoutMs: 5_000,
       onDelta: (text) => deltas.push(text),
-      onTool: (ev) => tools.push({ status: ev.status, call_id: ev.call_id }),
+      onTool: (ev) =>
+        tools.push({
+          status: ev.status,
+          call_id: ev.call_id,
+          ...(ev.input ? { input: ev.input } : {}),
+        }),
       onRequiresAction: async (eventIds, pending: Map<string, CustomToolUse>) => {
         pendingSeen.push([...eventIds]);
         for (const id of eventIds) pending.delete(id);
@@ -458,6 +467,7 @@ describe('pollSessionEventsForAgentReply', () => {
     });
     expect(pendingSeen).toEqual([['ctu1']]);
     expect(tools.some((t) => t.call_id === 'ctu1' && t.status === 'running')).toBe(true);
+    expect(tools.find((t) => t.call_id === 'ctu1')?.input).toEqual({ order_id: '1' });
     expect(deltas).toEqual(['订单已付']);
   });
 

@@ -40,6 +40,8 @@ export interface PollSessionEventsParams {
     call_id: string;
     status: 'running' | 'done' | 'error';
     message?: string;
+    /** 方舟 agent.custom_tool_use.input，透传给前端 */
+    input?: Record<string, unknown>;
   }) => void;
   onRequiresAction?: (
     eventIds: string[],
@@ -140,6 +142,7 @@ export async function pollSessionEventsForAgentReply(params: PollSessionEventsPa
           tool_name: custom.name,
           call_id: custom.id,
           status: 'running',
+          input: custom.input,
         });
       }
 

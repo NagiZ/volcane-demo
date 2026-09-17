@@ -10,8 +10,15 @@ function lockKey(tokenHash: string): string {
   return `ark:user_memory:lock:${tokenHash}`;
 }
 
+export interface UserMemoryStore {
+  getMemoryStoreId(tokenHash: string): Promise<string | null>;
+  setMemoryStoreId(tokenHash: string, memoryStoreId: string): Promise<void>;
+  tryAcquireCreateLock(tokenHash: string): Promise<boolean>;
+  releaseCreateLock(tokenHash: string): Promise<void>;
+}
+
 /** tokenHash → memory_store_id 永久映射 */
-export class UserMemoryRedisStore {
+export class UserMemoryRedisStore implements UserMemoryStore {
   constructor(private readonly redis: Redis) {}
 
   async getMemoryStoreId(tokenHash: string): Promise<string | null> {

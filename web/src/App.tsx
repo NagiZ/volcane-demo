@@ -4,8 +4,7 @@ import { Composer, type SendPayload } from './components/Composer';
 import { MessageList } from './components/MessageList';
 import { OutputFilesBar } from './components/OutputFilesBar';
 import { TokenBar } from './components/TokenBar';
-import { ToolStatusBar } from './components/ToolStatusBar';
-import type { BackendStatus, ChatMessage, ToolCallStatus } from './types';
+import type { BackendStatus, ChatMessage } from './types';
 
 const TOKEN_STORAGE_KEY = 'volcane.webUserToken';
 const DEFAULT_TOKEN = 'demo-user';
@@ -39,7 +38,6 @@ export function App() {
   const [backendStatus, setBackendStatus] = useState<BackendStatus>('checking');
   const [notice, setNotice] = useState<string | null>(null);
   const [outputRefreshKey, setOutputRefreshKey] = useState(0);
-  const [toolCalls, setToolCalls] = useState<ToolCallStatus[]>([]);
 
   const abortRef = useRef<AbortController | null>(null);
   const interruptedRef = useRef(false);
@@ -171,7 +169,6 @@ export function App() {
 
     setMessages((prev) => [...prev, user]);
     setNotice(null);
-    setToolCalls([]);
     setStreaming(true);
     setWaitingDelta(true);
 
@@ -191,18 +188,15 @@ export function App() {
         signal: controller.signal,
         onEvent: (event) => {
           if (event.type === 'tool') {
-            setToolCalls((prev) => {
-              const rest = prev.filter((x) => x.call_id !== event.call_id);
-              return [
-                ...rest,
-                {
-                  call_id: event.call_id,
-                  tool_name: event.tool_name,
-                  status: event.status,
-                  ...(event.message ? { message: event.message } : {}),
-                },
-              ];
-            });
+            // 静默处理：不展示 UI，仅对 output_query_params 打控制台日志
+            if (
+              event.tool_name === 'output_query_params' &&
+              event.status === 'running' &&
+              event.input &&
+              'query_params' in event.input
+            ) {
+              console.log('[output_query_params]', event.input.query_params);
+            }
             return;
           }
 
@@ -277,7 +271,7 @@ export function App() {
         },
       ]);
     } finally {
-      setToolCalls([]);
+      // 工具状态条保留到下次发送；此处清空会导致 SSE 刚结束就看不见 output_query_params
       if (abortRef.current === controller) {
         abortRef.current = null;
         setStreaming(false);
@@ -322,7 +316,6 @@ export function App() {
         <MessageList messages={messages} waiting={waitingDelta} />
       </main>
       <footer className="dock">
-        <ToolStatusBar items={toolCalls} />
         <OutputFilesBar token={token} disabled={busy} refreshToken={outputRefreshKey} />
         <Composer
           webUserToken={token}

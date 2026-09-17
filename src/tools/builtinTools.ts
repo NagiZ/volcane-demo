@@ -23,4 +23,7 @@ export function registerBuiltinTools(): void {
       created_by: ctx.userId,
     };
   });
+
+  /** 商品分析：确认收到 query_params，官方 content 文本块回传 "1" */
+  registerToolHandler('output_query_params', async () => '1');
 }

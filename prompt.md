@@ -19,6 +19,7 @@
 4、创建 Session 时，使用 environment_with_overrides 覆写模式，基于一份固定的基础 environment_id，会话级别注入：
    - USER_ID：MVP 阶段使用 tokenHash 作为临时用户标识；
    - USER_BEARER_TOKEN：当前 webUserToken；
+   - LEYO_AGENT_MACHINE_FINGERPRINT：固定值 ARK_CLOUD_MA；
    给沙箱 Skill 读取。
 5、沙箱内Skill代码通过 os.getenv() 读取该会话独有的鉴权变量，自行发起外部接口请求，不需要后端中转代理；
 6、多人会话天然隔离：每个userId对应独立session、独立沙箱Sandbox；

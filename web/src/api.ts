@@ -51,6 +51,7 @@ export function parseNormalizedEvent(raw: unknown): NormalizedSseEvent | null {
       call_id: raw.call_id,
       status: raw.status,
       ...(typeof raw.message === 'string' ? { message: raw.message } : {}),
+      ...(isRecord(raw.input) ? { input: raw.input } : {}),
     };
   }
   return null;

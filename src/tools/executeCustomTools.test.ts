@@ -45,4 +45,30 @@ describe('executeCustomTools', () => {
     expect(results[0].is_error).toBe(true);
     expect(results[1].is_error).toBe(true);
   });
+
+  it('output_query_params 回传纯文本 "1"', async () => {
+    registerToolHandler('output_query_params', async () => '1');
+    const pending = new Map<string, CustomToolUse>([
+      [
+        'evt-qp',
+        {
+          id: 'evt-qp',
+          name: 'output_query_params',
+          input: { query_params: { sku: 'A' } },
+        },
+      ],
+    ]);
+    const results = await executeCustomTools({
+      eventIds: ['evt-qp'],
+      pending,
+      userId: 'hash-u',
+    });
+    expect(results).toEqual([
+      {
+        custom_tool_use_id: 'evt-qp',
+        is_error: false,
+        content: [{ type: 'text', text: '1' }],
+      },
+    ]);
+  });
 });

@@ -37,6 +37,8 @@ describe('buildCreateSessionBody', () => {
     expect(config.env.USER_BEARER_TOKEN).toBe('token');
     // 前端输入的 token 需作为 Agent 启动密钥注入
     expect(config.env.LEYO_AGENT_KEY).toBe('token');
+    // 新建会话注入固定的机器指纹
+    expect(config.env.LEYO_AGENT_MACHINE_FINGERPRINT).toBe('ARK_CLOUD_MA');
   });
 
   it('includes memory_store resources when provided', () => {

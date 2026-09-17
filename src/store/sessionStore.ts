@@ -6,7 +6,13 @@ function redisKey(tokenHash: string): string {
   return `ark:session:map:${tokenHash}`;
 }
 
-export class SessionStore {
+export interface SessionMapStore {
+  getSessionId(tokenHash: string): Promise<string | null>;
+  setSessionId(tokenHash: string, sessionId: string): Promise<void>;
+  deleteSession(tokenHash: string): Promise<void>;
+}
+
+export class SessionStore implements SessionMapStore {
   constructor(private readonly redis: Redis) {}
 
   async getSessionId(tokenHash: string): Promise<string | null> {

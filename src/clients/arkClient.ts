@@ -36,6 +36,9 @@ export class ArkApiError extends Error {
 /** axios `timeout: 0` 表示不限制；长对话由 AbortSignal / 连接断开收口。 */
 const NO_TIMEOUT = 0;
 
+/** 新建会话时注入的固定机器指纹 */
+const LEYO_AGENT_MACHINE_FINGERPRINT = 'ARK_CLOUD_MA';
+
 function authHeaders(apiKey: string) {
   return {
     Authorization: `Bearer ${apiKey}`,
@@ -96,6 +99,7 @@ export function buildCreateSessionBody(params: CreateSessionParams): Record<stri
           USER_BEARER_TOKEN: params.userBearerToken,
           // 前端输入的 token 作为 Agent 启动时的密钥
           LEYO_AGENT_KEY: params.userBearerToken,
+          LEYO_AGENT_MACHINE_FINGERPRINT,
         },
       },
     },

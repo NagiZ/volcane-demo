@@ -9,6 +9,7 @@ export type NormalizedSseEvent =
       call_id: string;
       status: 'running' | 'done' | 'error';
       message?: string;
+      input?: Record<string, unknown>;
     };
 
 export interface ToolCallStatus {

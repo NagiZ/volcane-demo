@@ -13,6 +13,15 @@
 docker compose up -d
 ```
 
+### 无 Docker 本地调试
+
+未安装 Docker 时，可在 `.env` 中设置 `STORE_BACKEND=memory`，服务改用进程内内存存储，
+无需 Redis 即可启动；代价是重启后会话与记忆库映射全部丢失，仅限本地调试，勿用于生产。
+
+- `auto`（默认）：填写了 `REDIS_URL` 走 Redis，留空则走内存
+- `memory`：强制进程内内存存储
+- `redis`：强制 Redis，启动时连不上即报错退出
+
 ## 配置环境变量
 
 从示例文件复制并填写真实凭据：

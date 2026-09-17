@@ -7,7 +7,7 @@ import {
   updateMemoryFile,
 } from '../clients/arkMemoryClient.js';
 import type { AppConfig } from '../config.js';
-import { UserMemoryRedisStore } from '../store/memoryStore.js';
+import type { UserMemoryStore } from '../store/memoryStore.js';
 import { resolveUserKey } from '../utils/hash.js';
 import { normalizeMemoryPath } from '../utils/memoryPath.js';
 
@@ -21,7 +21,7 @@ function sleep(ms: number): Promise<void> {
 export class MemoryService {
   constructor(
     private readonly config: AppConfig,
-    private readonly store: UserMemoryRedisStore,
+    private readonly store: UserMemoryStore,
   ) {}
 
   async getOrCreateUserMemoryStore(tokenHash: string): Promise<string> {

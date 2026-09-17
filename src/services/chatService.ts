@@ -1,5 +1,3 @@
-import type { IncomingMessage } from 'node:http';
-import type { Readable } from 'node:stream';
 import type { Response } from 'express';
 import {
   ArkApiError,
@@ -10,7 +8,6 @@ import {
   sendCustomToolResults,
   sendSessionEvent,
   sendSessionInterrupt,
-  tryStreamSessionEvents,
 } from '../clients/arkClient.js';
 import type { AppConfig } from '../config.js';
 import { executeCustomTools } from '../tools/executeCustomTools.js';
@@ -23,7 +20,6 @@ import { sessionEventKey } from '../utils/arkEventParser.js';
 import { pollSessionEventsForAgentReply } from '../utils/pollSessionEvents.js';
 import { SESSION_HISTORY_LIMIT, toChronologicalChatMessages, type ChatHistoryMessage } from '../utils/sessionHistory.js';
 import { endSse, initSse, writeSseEvent } from '../utils/sse.js';
-import { pipeArkStreamToSse } from '../utils/streamArkEvents.js';
 import { SessionService } from './sessionService.js';
 
 /**
@@ -121,64 +117,59 @@ export class ChatService {
       const baselineEvents = await listSessionEvents(this.arkListParams(sessionId, signal));
       const baselineEventIds = new Set(baselineEvents.map((event) => sessionEventKey(event)));
 
-      // 文档要求先连 GET /events/stream 再投递 user.message，否则会丢掉本轮事件。
-      const stream = await tryStreamSessionEvents(this.arkListParams(sessionId, signal));
-      try {
-        const piped = stream
-          ? pipeArkStreamToSse(stream as unknown as IncomingMessage, (text) => {
-              writeSseEvent(res, { type: 'delta', text });
-            })
-          : null;
+      // Custom Tool（agent.custom_tool_use / requires_action / user.custom_tool_result）
+      // 仅挂在轮询路径。若走 GET /events/stream 短路，前端永远收不到 SSE tool，
+      // 且 requires_action idle 会被 pipeArkStreamToSse 当成普通 idle 直接结束。
+      await sendSessionEvent({
+        ...this.arkListParams(sessionId, signal),
+        userMessage,
+        mountedPaths: options?.mountedPaths,
+        inlineFileIds: options?.inlineFileIds,
+      });
 
-        await sendSessionEvent({
-          ...this.arkListParams(sessionId, signal),
-          userMessage,
-          mountedPaths: options?.mountedPaths,
-          inlineFileIds: options?.inlineFileIds,
-        });
-
-        if (piped) {
-          await piped;
-          return;
-        }
-
-        await pollSessionEventsForAgentReply({
-          listEvents: () => listSessionEvents(this.arkListParams(sessionId, signal)),
-          baselineEventIds,
-          onDelta: (text) => writeSseEvent(res, { type: 'delta', text }),
-          onTool: (ev) => writeSseEvent(res, { type: 'tool', ...ev }),
-          onRequiresAction: async (eventIds, pending) => {
-            const snapshot = eventIds.map((id) => ({
-              id,
-              name: pending.get(id)?.name ?? 'unknown',
-            }));
-            const results = await executeCustomTools({ eventIds, pending, userId });
-            for (let i = 0; i < results.length; i++) {
-              const r = results[i]!;
-              const meta = snapshot[i]!;
-              writeSseEvent(res, {
-                type: 'tool',
-                tool_name: meta.name,
-                call_id: r.custom_tool_use_id,
-                status: r.is_error ? 'error' : 'done',
-                ...(r.is_error
-                  ? { message: r.content[0]?.text ?? 'tool error' }
-                  : {}),
-              });
-            }
-            await sendCustomToolResults({
-              arkApiKey: this.config.arkApiKey,
-              arkBaseUrl: this.config.arkBaseUrl,
-              sessionId,
-              results,
-              signal,
+      await pollSessionEventsForAgentReply({
+        listEvents: () => listSessionEvents(this.arkListParams(sessionId, signal)),
+        baselineEventIds,
+        onDelta: (text) => writeSseEvent(res, { type: 'delta', text }),
+        onTool: (ev) => {
+          console.log('[custom-tool]', ev.status, ev.tool_name, ev.call_id);
+          writeSseEvent(res, { type: 'tool', ...ev });
+        },
+        onRequiresAction: async (eventIds, pending) => {
+          const snapshot = eventIds.map((id) => ({
+            id,
+            name: pending.get(id)?.name ?? 'unknown',
+            input: pending.get(id)?.input,
+          }));
+          console.log(
+            '[custom-tool] requires_action',
+            snapshot.map((s) => `${s.name}(${s.id})`).join(', '),
+          );
+          const results = await executeCustomTools({ eventIds, pending, userId });
+          for (let i = 0; i < results.length; i++) {
+            const r = results[i]!;
+            const meta = snapshot[i]!;
+            writeSseEvent(res, {
+              type: 'tool',
+              tool_name: meta.name,
+              call_id: r.custom_tool_use_id,
+              status: r.is_error ? 'error' : 'done',
+              ...(meta.input ? { input: meta.input } : {}),
+              ...(r.is_error
+                ? { message: r.content[0]?.text ?? 'tool error' }
+                : {}),
             });
-          },
-          signal,
-        });
-      } finally {
-        (stream as Readable | null)?.destroy?.();
-      }
+          }
+          await sendCustomToolResults({
+            arkApiKey: this.config.arkApiKey,
+            arkBaseUrl: this.config.arkBaseUrl,
+            sessionId,
+            results,
+            signal,
+          });
+        },
+        signal,
+      });
     } finally {
       settled = true;
       res.req.off('close', onClientGone);

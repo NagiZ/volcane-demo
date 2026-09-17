@@ -1,14 +1,14 @@
 import { createArkSession } from '../clients/arkClient.js';
 import { buildMemoryStoreResource } from '../clients/arkMemoryClient.js';
 import type { AppConfig } from '../config.js';
-import { SessionStore } from '../store/sessionStore.js';
+import type { SessionMapStore } from '../store/sessionStore.js';
 import { resolveUserKey } from '../utils/hash.js';
 import type { MemoryService } from './memoryService.js';
 
 export class SessionService {
   constructor(
     private readonly config: AppConfig,
-    private readonly store: SessionStore,
+    private readonly store: SessionMapStore,
     private readonly memoryService: MemoryService,
   ) {}
 
